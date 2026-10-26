@@ -780,7 +780,9 @@ begin
     end;
     FSearch.Prog := CompileProgram(Parsed.Root, FSyntax.Unicode, -1, Arena);
   finally
-    Arena.Free;
+    // A program that builds its forward automaton later keeps the tree, and has taken the arena.
+    if (FSearch.Prog = nil) or (FSearch.Prog.Arena <> Arena) then
+      Arena.Free;
   end;
   FSearch.Groups := FGroupCount;
   FSearch.Unicode := FSyntax.Unicode;
@@ -839,11 +841,13 @@ begin
   if FSearch.Caps <> nil then
     Exit;
   Arena := TNodeArena.Create;
+  Built := nil;
   try
     Parsed := ParseWith(FPattern, FSyntax, Arena);
     Built := CompileProgram(Parsed.Root, FSyntax.Unicode, FGroupCount, Arena);
   finally
-    Arena.Free;
+    if (Built = nil) or (Built.Arena <> Arena) then
+      Arena.Free;
   end;
   // Two threads that race both build the program, and the one that loses frees its copy.
   if InterlockedCompareExchangePointer(Pointer(FSearch.Caps), Pointer(Built), nil) <> nil then

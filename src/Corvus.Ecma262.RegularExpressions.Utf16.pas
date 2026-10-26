@@ -21,6 +21,13 @@ type
 
 implementation
 
+uses
+  Corvus.Ecma262.RegularExpressions.Syntax,
+  Corvus.Ecma262.RegularExpressions.Swar,
+  Corvus.Ecma262.RegularExpressions.Literals,
+  Corvus.Ecma262.RegularExpressions.Adfa,
+  Corvus.Ecma262.RegularExpressions.Search;
+
 {$I Corvus.Ecma262.RegularExpressions.MatcherBase.inc}
 
 const
@@ -192,6 +199,76 @@ end;
 function IsValidText(const T: TText): Boolean;
 begin
   Result := True;
+end;
+
+{ The parts of the searches of the matcher that differ between the encodings beyond the unit. }
+
+{ MidPair reports whether the position is between the halves of a surrogate pair. }
+function MidPair(const T: TText; At: NativeInt): Boolean; inline;
+begin
+  Result := (At > 0) and (At < T.Len) and IsLow(U(T, At)) and IsHigh(U(T, At - 1));
+end;
+
+{ FirstFind is the first position at or after At whose unit a member of the first set can start with, or -1; At
+  itself where the search has no first units. With the u or v flag the trail half of a pair is not a character a match
+  can start at. }
+function FirstFind(Prog: TProgram; const T: TText; At: NativeInt): NativeInt;
+var
+  FU: TUnitSet;
+begin
+  FU := Prog.Search.FirstUnits;
+  if FU = nil then
+    Exit(At);
+  while True do begin
+    At := FU.Find(T.P, T.Len, At);
+    if (At < 0) or Prog.Units or not MidPair(T, At) then
+      Exit(At);
+    Inc(At);
+  end;
+end;
+
+{ FirstStart is FirstFind for the scan, which passes over the trail half of a pair itself, so that the skip is run
+  from the place after it. }
+function FirstStart(Prog: TProgram; const T: TText; At: NativeInt): NativeInt;
+var
+  FU: TUnitSet;
+begin
+  FU := Prog.Search.FirstUnits;
+  if FU = nil then
+    Exit(At);
+  Result := FU.Find(T.P, T.Len, At);
+end;
+
+function RunEndOf(S: TSearchPlan; const T: TText; At: NativeInt): NativeInt;
+var
+  F: NativeInt;
+begin
+  case S.RunEnd of
+    reAll: Exit(T.Len);
+    reStops, reLine: begin
+      F := S.Stops16.Find(T.P, T.Len, At);
+      if F >= 0 then
+        Exit(F);
+      Exit(T.Len);
+    end;
+  end;
+  Result := -1;
+end;
+
+{ AfterFind is AdfaBail: over UTF-16 the literal's states are not known, and the matcher decides. }
+function AfterFind(Prog: TProgram; const T: TText; Q: NativeInt): NativeInt; inline;
+begin
+  Result := AdfaBail;
+end;
+
+function FindLiterals(L: TLiterals; const T: TText; From: NativeInt; out S, E: NativeInt): Boolean; inline;
+begin
+  Result := L.Find16(T.P, T.Len, From, S, E);
+end;
+
+function FindWithin(L: TLiterals; const T: TText; From, Last: NativeInt): NativeInt; inline;
+begin
+  Result := L.FindWithin16(T.P, T.Len, From, Last);
 end;
 
 {$I Corvus.Ecma262.RegularExpressions.Matcher.inc}

@@ -11,7 +11,9 @@ interface
 uses
   SysUtils,
   Corvus.Ecma262.RegularExpressions.CharSet,
-  Corvus.Ecma262.RegularExpressions.Syntax;
+  Corvus.Ecma262.RegularExpressions.Syntax,
+  Corvus.Ecma262.RegularExpressions.Adfa,
+  Corvus.Ecma262.RegularExpressions.Search;
 
 type
   TOp = (
@@ -149,17 +151,40 @@ type
       otherwise. }
     HasFirst: Boolean;
     First: TCharSet;
+    { How the search finds where a match can start (see the Search unit). }
+    Search: TSearchPlan;
+    { The anchored automaton that finds where a match from a start ends, for a program that records no group and
+      needs no backtracking (see the Adfa unit), or nil. }
+    AnchoredDfa: TAnchoredDfa;
+    { The tree of a pattern whose search tries every start its first set allows, from which the forward automaton
+      (see BuildForwardDfa) is built on the first search that wants it, or nil; and the arena that holds it, which the
+      program then owns. FForward is nil until then, and then the automaton or NoForward for none. }
+    ForwardRoot: TNode;
+    Arena: TNodeArena;
+    FForward: Pointer;
+    { For the same patterns, the window of positions read one unit at a time before the first set is searched for
+      (see TSkipWin), or nil. }
+    Skip: TSkipWin;
+    { For a pattern every match of which starts with one literal (a window at distance 0 of one literal over UTF-8),
+      the anchored automaton's states after it (see After), and its length, when HasAfter: an occurrence goes on from
+      there, its units not read again. }
+    HasAfter: Boolean;
+    AfterLiteral: TStartRows;
+    AfterLength: NativeInt;
+    destructor Destroy; override;
+    { Forward is the forward automaton, built on the first search that wants it, or nil when there is none. }
+    function Forward: TAnchoredDfa;
   end;
 
 const
   { The need of an instruction from which no way leads to a match. Every need is capped at it. }
   NoMatch = 1 shl 30;
-  { What a byte that is not UTF-8 decodes to. }
-  RuneError = $FFFD;
 
 { CompileProgram compiles a tree, changing it in place, with the nodes it makes going to the arena. With Groups at 0
   or more the program records every one of that many capturing groups, group g in slot g - 1, so that a match can
-  report what each captured; with Groups below 0, only the groups some backreference names. }
+  report what each captured; with Groups below 0, only the groups some backreference names. A program whose search
+  builds the forward automaton later keeps the tree, and takes the arena (Result.Arena is it): the caller frees the
+  arena only when the program has not taken it. }
 function CompileProgram(Root: TNode; Unicode: Boolean; Groups: Int32; Arena: TNodeArena): TProgram;
 
 { Unrolling says whether small counted repetitions are written out. The tests of the loops' needs and memo points turn
@@ -254,13 +279,6 @@ begin
     (Q.AtEnd = O.AtEnd);
 end;
 
-{ LiteralRune reports whether a code point can be matched by comparing its UTF-8 bytes. A surrogate has no encoding,
-  and U+FFFD is also what a malformed byte of the text decodes to. }
-function LiteralRune(R: Int32): Boolean;
-begin
-  Result := (R >= 0) and (R <= $10FFFF) and not ((R >= $D800) and (R <= $DFFF)) and (R <> RuneError);
-end;
-
 { Consumes reports whether N can match one character or more. It errs towards true. }
 function Consumes(N: TNode): Boolean;
 var
@@ -277,31 +295,6 @@ begin
     nkRepeat: Exit((N.Max <> 0) and Consumes(N.Subs[0]));
   end;
   Result := False;
-end;
-
-{ Nullable reports whether N can match without consuming anything. It errs towards true. }
-function Nullable(N: TNode): Boolean;
-var
-  K: Int32;
-begin
-  case N.Kind of
-    nkChar, nkSet: Exit(False);
-    nkCat: begin
-      for K := 0 to High(N.Subs) do
-        if not Nullable(N.Subs[K]) then
-          Exit(False);
-      Exit(True);
-    end;
-    nkAlt: begin
-      for K := 0 to High(N.Subs) do
-        if Nullable(N.Subs[K]) then
-          Exit(True);
-      Exit(False);
-    end;
-    nkGroup: Exit(Nullable(N.Subs[0]));
-    nkRepeat: Exit((N.Min = 0) or Nullable(N.Subs[0]));
-  end;
-  Result := True;
 end;
 
 { HasCapture reports whether a node holds a capturing group, a backreference or a lookaround. }
@@ -573,19 +566,6 @@ begin
     end;
   end;
   Result := True;
-end;
-
-{ RuneLen is the number of bytes of UTF-8 a code point takes. }
-function RuneLen(R: Int32): Int32;
-begin
-  if R <= $7F then
-    Result := 1
-  else if R <= $7FF then
-    Result := 2
-  else if R <= $FFFF then
-    Result := 3
-  else
-    Result := 4;
 end;
 
 { TimesNeed is Count times Need, capped at NoMatch. }
@@ -866,6 +846,60 @@ begin
         Insts[Pc].Back[C] := Bytes[C];
     end;
   end;
+end;
+
+const
+  { What FForward holds for a program with no forward automaton. }
+  NoForward = Pointer(1);
+
+{ TProgram }
+
+destructor TProgram.Destroy;
+begin
+  if (FForward <> nil) and (FForward <> NoForward) then
+    TAnchoredDfa(FForward).Free;
+  Search.Free;
+  AnchoredDfa.Free;
+  Skip.Free;
+  Arena.Free;
+  inherited;
+end;
+
+function TProgram.Forward: TAnchoredDfa;
+var
+  Built: Pointer;
+begin
+  if ForwardRoot = nil then
+    Exit(nil);
+  Built := FForward;
+  if Built = nil then begin
+    Built := BuildForwardDfa(ForwardRoot);
+    if Built = nil then
+      Built := NoForward;
+    // Two threads that race both build the automaton, and the one that loses frees its copy.
+    if InterlockedCompareExchangePointer(FForward, Built, nil) <> nil then begin
+      if Built <> NoForward then
+        TAnchoredDfa(Built).Free;
+      Built := FForward;
+    end;
+  end;
+  if Built = NoForward then
+    Result := nil
+  else
+    Result := TAnchoredDfa(Built);
+end;
+
+{ ShallowerThan reports whether a tree nests fewer than Limit levels. }
+function ShallowerThan(N: TNode; Limit: Int32): Boolean;
+var
+  K: Int32;
+begin
+  if Limit <= 0 then
+    Exit(False);
+  for K := 0 to High(N.Subs) do
+    if not ShallowerThan(N.Subs[K], Limit - 1) then
+      Exit(False);
+  Result := True;
 end;
 
 { TCompiler }
@@ -1333,6 +1367,8 @@ begin
     SetLength(C.Points, C.PointCount);
     Result.Points := C.Points;
     Result.HasFirst := False;
+    if (Result.Groups = 0) and (NRefs = 0) then
+      Result.AnchoredDfa := BuildAdfa(Root);
     if not Result.Anchored then begin
       Pairs := nil;
       Np := 0;
@@ -1342,7 +1378,21 @@ begin
         Result.First := NewCharSet(Pairs);
         Result.HasFirst := True;
       end;
-    end;
+      Result.Search := PlanSearch(Root, NRefs > 0, Result.HasFirst, Result.First, not Unicode, Arena);
+      if (Result.Search.Plan = pkWindows) and (Result.Search.Hi = 0) and (Result.AnchoredDfa <> nil) and
+        Result.Search.Literals.HasSingle8 then
+        if Result.AnchoredDfa.After(Result.Search.Literals.Single8, Result.AfterLiteral) then begin
+          Result.HasAfter := True;
+          Result.AfterLength := Length(Result.Search.Literals.Single8);
+        end;
+      if not NoSearch and (NRefs = 0) and ShallowerThan(Root, 64) and (Result.Search.Plan = pkScan) and
+        (Result.Search.Shape = shNone) then begin
+        Result.ForwardRoot := Root;
+        Result.Arena := Arena;
+        Result.Skip := SkipWindow(Root);
+      end;
+    end else
+      Result.Search := TSearchPlan.Create;
   finally
     C.Free;
   end;

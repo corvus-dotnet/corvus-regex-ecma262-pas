@@ -206,6 +206,9 @@ procedure RaiseRange;
 
 implementation
 
+uses
+  Corvus.Ecma262.RegularExpressions.Literals;
+
 threadvar
   State: TState;
 
@@ -225,6 +228,7 @@ begin
   St^.Counts := nil;
   St^.Memo := nil;
   St^.Sp := 0;
+  ReleaseLiteralBuffers;
 end;
 
 procedure RaiseRange;

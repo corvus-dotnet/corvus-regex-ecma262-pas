@@ -23,7 +23,7 @@ pwsh tools/build.ps1 -Fpc ~/sdk/fpc-3.2.2/bin/fpc -Options '-O1 -gl'
 param(
     [string] $Fpc = 'fpc',
     [string] $Options = '-O3',
-    [string[]] $Programs = @('tests/TestEngine.pas', 'tools/dataset/run.pas')
+    [string[]] $Programs = @('tests/TestEngine.pas', 'tests/TestSearch.pas', 'tools/dataset/run.pas')
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot

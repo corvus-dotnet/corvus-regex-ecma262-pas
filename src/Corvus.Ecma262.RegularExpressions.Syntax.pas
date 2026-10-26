@@ -17,6 +17,8 @@ uses
 const
   { The max of a quantifier with no upper bound. }
   Unbounded = -1;
+  { What a byte that is not UTF-8 decodes to. }
+  RuneError = $FFFD;
   { Caps the bounds of a counted quantifier. No text that fits in memory reaches a larger count. }
   MaxCount = High(Int32);
 
@@ -126,6 +128,16 @@ function ParseWith(const Pattern: UTF8String; const Sx: TSyntax; Arena: TNodeAre
 
 { DecodeUtf8 reads UTF-8 into code points. It reports false for bytes that are not UTF-8. }
 function DecodeUtf8(const S: UTF8String; out Runes: TRunes): Boolean;
+
+{ LiteralRune reports whether a code point can be matched by comparing its UTF-8 bytes. A surrogate has no encoding,
+  and U+FFFD is also what a malformed byte of the text decodes to. }
+function LiteralRune(R: Int32): Boolean;
+
+{ RuneLen is the number of bytes of UTF-8 a code point takes. }
+function RuneLen(R: Int32): Int32;
+
+{ Nullable reports whether N can match without consuming anything. It errs towards true. }
+function Nullable(N: TNode): Boolean;
 
 { HighSurrogate and LowSurrogate are the two UTF-16 code units of a code point beyond the Basic Multilingual Plane. }
 function HighSurrogate(C: Int32): Int32; inline;
@@ -323,6 +335,47 @@ begin
 end;
 
 { Text }
+
+function LiteralRune(R: Int32): Boolean;
+begin
+  Result := (R >= 0) and (R <= $10FFFF) and not ((R >= $D800) and (R <= $DFFF)) and (R <> RuneError);
+end;
+
+function RuneLen(R: Int32): Int32;
+begin
+  if R <= $7F then
+    Result := 1
+  else if R <= $7FF then
+    Result := 2
+  else if R <= $FFFF then
+    Result := 3
+  else
+    Result := 4;
+end;
+
+function Nullable(N: TNode): Boolean;
+var
+  K: Int32;
+begin
+  case N.Kind of
+    nkChar, nkSet: Exit(False);
+    nkCat: begin
+      for K := 0 to High(N.Subs) do
+        if not Nullable(N.Subs[K]) then
+          Exit(False);
+      Exit(True);
+    end;
+    nkAlt: begin
+      for K := 0 to High(N.Subs) do
+        if Nullable(N.Subs[K]) then
+          Exit(True);
+      Exit(False);
+    end;
+    nkGroup: Exit(Nullable(N.Subs[0]));
+    nkRepeat: Exit((N.Min = 0) or Nullable(N.Subs[0]));
+  end;
+  Result := True;
+end;
 
 function HighSurrogate(C: Int32): Int32;
 begin

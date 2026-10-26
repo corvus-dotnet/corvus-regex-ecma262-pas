@@ -452,7 +452,9 @@ begin
   Words[Id] := Word;
   AtStarts[Id] := AtStart;
   Inc(StateCount);
-  SetLength(Trans, StateCount * Stride);
+  // The table grows by doubling, and a new row is zero.
+  if StateCount * Stride > Length(Trans) then
+    SetLength(Trans, 2 * StateCount * Stride);
   for K := Id * Stride to StateCount * Stride - 1 do
     Trans[K] := 0;
   // At the end of the text the end anchors are passed, and a boundary is between a unit and none.
@@ -580,7 +582,7 @@ begin
   end;
   Result := TDfa.Create;
   Move(ClassOf[0], Result.ClassOf[0], SizeOf(ClassOf));
-  Result.Trans := B.Trans;
+  Result.Trans := Copy(B.Trans, 0, B.StateCount * Stride);
   Result.Shift := Shift;
   Result.Start := S0;
   Result.AtEnd := Copy(B.AtEnd, 0, B.StateCount);
