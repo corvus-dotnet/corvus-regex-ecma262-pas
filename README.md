@@ -76,9 +76,9 @@ Delphi frees it when a thread ends, so a thread that has matched and is about to
 
 ## Status
 
-Not yet released. The parser, the compiler and the matcher are in, and the whole test data passes. The crate's search
-layer (where a match can start, and the automata), the harness of the central benchmark site and the first release,
-0.1.0, come next.
+Not yet released. The parser, the compiler, the matcher and the crate's search layer (where a match can start, and the
+automata) are in, and the whole test data passes. `docs/port-checklist.md` lists every optimisation of the search layer
+and how this port has it. The harness of the central benchmark site and the first release, 0.1.0, come next.
 
 ## Installing
 
@@ -97,6 +97,9 @@ The one unit a program names in its `uses` clause is `Corvus.Ecma262.RegularExpr
 ```
 pwsh tools/build.ps1
 bin/TestEngine
+bin/TestSearch
+bin/TestAllocations
+bin/stackprobe
 bin/run <ecma262-regex-test-data>/data wrong-cases.tsv --threads 4
 ```
 
