@@ -1,0 +1,4 @@
+.git
+lib/
+bin/
+wrong-cases*.tsv

@@ -1,0 +1,401 @@
+[
+ {
+  "name": "mariomka",
+  "pattern": "[\\w\\.+-]+@[\\w\\.-]+\\.[\\w\\.-]+",
+  "flags": "",
+  "file": "mariomka.txt.gz",
+  "id": "mariomka: [\\w\\.+-]+@[\\w\\.-]+\\.[\\w\\.-]+"
+ },
+ {
+  "name": "mariomka",
+  "pattern": "[\\w]+://[^/\\s?#]+[^\\s?#]+(?:\\?[^\\s#]*)?(?:#[^\\s]*)?",
+  "flags": "",
+  "file": "mariomka.txt.gz",
+  "id": "mariomka: [\\w]+://[^/\\s?#]+[^\\s?#]+(?:\\?[^\\s#]*..."
+ },
+ {
+  "name": "mariomka",
+  "pattern": "(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9])",
+  "flags": "",
+  "file": "mariomka.txt.gz",
+  "id": "mariomka: (?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][..."
+ },
+ {
+  "name": "sherlock",
+  "pattern": "Sherlock",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: Sherlock"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "Holmes",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: Holmes"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "Sherlock Holmes",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: Sherlock Holmes"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "Sherlock",
+  "flags": "i",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: Sherlock /i"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "Holmes",
+  "flags": "i",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: Holmes /i"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "Sherlock Holmes",
+  "flags": "i",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: Sherlock Holmes /i"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "Sherlock\\s+Holmes",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: Sherlock\\s+Holmes"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "Sherlock|Street",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: Sherlock|Street"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "Sherlock|Holmes",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: Sherlock|Holmes"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "Sherlock|Holmes|Watson|Irene|Adler|John|Baker",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: Sherlock|Holmes|Watson|Irene|Adler|Jo..."
+ },
+ {
+  "name": "sherlock",
+  "pattern": "Sherlock|Holmes|Watson|Irene|Adler|John|Baker",
+  "flags": "i",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: Sherlock|Holmes|Watson|Irene|Adler|Jo... /i"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "Sher[a-z]+|Hol[a-z]+",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: Sher[a-z]+|Hol[a-z]+"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "Sher[a-z]+|Hol[a-z]+",
+  "flags": "i",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: Sher[a-z]+|Hol[a-z]+ /i"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "Sherlock|Holmes|Watson",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: Sherlock|Holmes|Watson"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "Sherlock|Holmes|Watson",
+  "flags": "i",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: Sherlock|Holmes|Watson /i"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "zqj",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: zqj"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "aqj",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: aqj"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "aei",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: aei"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "the",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: the"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "The",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: The"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "the",
+  "flags": "i",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: the /i"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "the\\s+\\w+",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: the\\s+\\w+"
+ },
+ {
+  "name": "sherlock",
+  "pattern": ".*",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: .*"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "[^\\n]*",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: [^\\n]*"
+ },
+ {
+  "name": "sherlock",
+  "pattern": ".*",
+  "flags": "s",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: .* /s"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "\\p{L}",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: \\p{L}"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "\\p{Lu}",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: \\p{Lu}"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "\\p{Ll}",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: \\p{Ll}"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "\\w+",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: \\w+"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "\\w+\\s+Holmes",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: \\w+\\s+Holmes"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "\\w+\\s+Holmes\\s+\\w+",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: \\w+\\s+Holmes\\s+\\w+"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "Holmes.{0,25}Watson|Watson.{0,25}Holmes",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: Holmes.{0,25}Watson|Watson.{0,25}Holmes"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "^Sherlock Holmes|Sherlock Holmes$",
+  "flags": "m",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: ^Sherlock Holmes|Sherlock Holmes$ /m"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "\\b\\w+n\\b",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: \\b\\w+n\\b"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "[a-q][^u-z]{13}x",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: [a-q][^u-z]{13}x"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "[a-zA-Z]+ing",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: [a-zA-Z]+ing"
+ },
+ {
+  "name": "sherlock",
+  "pattern": "\\s[a-zA-Z]{0,12}ing\\s",
+  "flags": "",
+  "file": "sherlock.txt.gz",
+  "id": "sherlock: \\s[a-zA-Z]{0,12}ing\\s"
+ },
+ {
+  "name": "leipzig",
+  "pattern": "Twain",
+  "flags": "",
+  "file": "3200.txt.gz",
+  "id": "leipzig: Twain"
+ },
+ {
+  "name": "leipzig",
+  "pattern": "Twain",
+  "flags": "i",
+  "file": "3200.txt.gz",
+  "id": "leipzig: Twain /i"
+ },
+ {
+  "name": "leipzig",
+  "pattern": "[a-z]shing",
+  "flags": "",
+  "file": "3200.txt.gz",
+  "id": "leipzig: [a-z]shing"
+ },
+ {
+  "name": "leipzig",
+  "pattern": "Huck[a-zA-Z]+|Saw[a-zA-Z]+",
+  "flags": "",
+  "file": "3200.txt.gz",
+  "id": "leipzig: Huck[a-zA-Z]+|Saw[a-zA-Z]+"
+ },
+ {
+  "name": "leipzig",
+  "pattern": "Tom|Sawyer|Huckleberry|Finn",
+  "flags": "",
+  "file": "3200.txt.gz",
+  "id": "leipzig: Tom|Sawyer|Huckleberry|Finn"
+ },
+ {
+  "name": "leipzig",
+  "pattern": "Tom|Sawyer|Huckleberry|Finn",
+  "flags": "i",
+  "file": "3200.txt.gz",
+  "id": "leipzig: Tom|Sawyer|Huckleberry|Finn /i"
+ },
+ {
+  "name": "leipzig",
+  "pattern": ".{0,2}(Tom|Sawyer|Huckleberry|Finn)",
+  "flags": "",
+  "file": "3200.txt.gz",
+  "id": "leipzig: .{0,2}(Tom|Sawyer|Huckleberry|Finn)"
+ },
+ {
+  "name": "leipzig",
+  "pattern": ".{2,4}(Tom|Sawyer|Huckleberry|Finn)",
+  "flags": "",
+  "file": "3200.txt.gz",
+  "id": "leipzig: .{2,4}(Tom|Sawyer|Huckleberry|Finn)"
+ },
+ {
+  "name": "leipzig",
+  "pattern": "Tom.{10,25}river|river.{10,25}Tom",
+  "flags": "",
+  "file": "3200.txt.gz",
+  "id": "leipzig: Tom.{10,25}river|river.{10,25}Tom"
+ },
+ {
+  "name": "leipzig",
+  "pattern": "([A-Za-z]awyer|[A-Za-z]inn)\\s",
+  "flags": "",
+  "file": "3200.txt.gz",
+  "id": "leipzig: ([A-Za-z]awyer|[A-Za-z]inn)\\s"
+ },
+ {
+  "name": "leipzig",
+  "pattern": "\\p{Sm}",
+  "flags": "",
+  "file": "3200.txt.gz",
+  "id": "leipzig: \\p{Sm}"
+ },
+ {
+  "name": "rebar-ru",
+  "pattern": "Шерлок Холмс",
+  "flags": "",
+  "file": "opensubtitles-ru.txt.gz",
+  "id": "rebar-ru: Шерлок Холмс"
+ },
+ {
+  "name": "rebar-ru",
+  "pattern": "Шерлок Холмс",
+  "flags": "i",
+  "file": "opensubtitles-ru.txt.gz",
+  "id": "rebar-ru: Шерлок Холмс /i"
+ },
+ {
+  "name": "rebar-ru",
+  "pattern": "Шерлок Холмс|Джон Уотсон|Ирен Адлер|инспектор Лестрейд|профессор Мориарти",
+  "flags": "",
+  "file": "opensubtitles-ru.txt.gz",
+  "id": "rebar-ru: Шерлок Холмс|Джон Уотсон|Ирен Адлер|и..."
+ },
+ {
+  "name": "rebar-ru",
+  "pattern": "Шерлок Холмс|Джон Уотсон|Ирен Адлер|инспектор Лестрейд|профессор Мориарти",
+  "flags": "i",
+  "file": "opensubtitles-ru.txt.gz",
+  "id": "rebar-ru: Шерлок Холмс|Джон Уотсон|Ирен Адлер|и... /i"
+ },
+ {
+  "name": "rebar-zh",
+  "pattern": "夏洛克·福尔摩斯",
+  "flags": "",
+  "file": "opensubtitles-zh.txt.gz",
+  "id": "rebar-zh: 夏洛克·福尔摩斯"
+ },
+ {
+  "name": "rebar-zh",
+  "pattern": "夏洛克·福尔摩斯|约翰华生|阿德勒|雷斯垂德|莫里亚蒂教授",
+  "flags": "",
+  "file": "opensubtitles-zh.txt.gz",
+  "id": "rebar-zh: 夏洛克·福尔摩斯|约翰华生|阿德勒|雷斯垂德|莫里亚蒂教授"
+ }
+]

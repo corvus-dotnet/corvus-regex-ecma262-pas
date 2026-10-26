@@ -16,6 +16,16 @@
           "count": 1
         }
       ]
+    },
+    {
+      "name": "harness",
+      "harnessOf": "corvus-regex-ecma262-pas",
+      "tag": "harness-",
+      "paths": [
+        "Dockerfile",
+        "tools/benchmarks/",
+        "tools/dataset/"
+      ]
     }
   ]
 }
