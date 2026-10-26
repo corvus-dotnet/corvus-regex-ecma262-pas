@@ -1,0 +1,158 @@
+# The tests, the generated tables and the ECMA-262 test data, with Free Pascal 3.2.2 (the library's floor) on Linux,
+# Windows and macOS. The data (github.com/corvus-dotnet/ecma262-regex-test-data) is pinned to a commit; the pass is 0
+# wrong answers, 0 refusals of a valid pattern, 0 acceptances of an invalid one and 0 matches at their limit, in both
+# encodings. The source is written to be Delphi-compatible, and nothing here compiles it with Delphi.
+name: ci
+on:
+  push:
+    branches:
+    - main
+  pull_request:
+  schedule:
+  - cron: '53 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test (Free Pascal 3.2.2, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        persist-credentials: false
+    - name: Free Pascal (Ubuntu)
+      # The distribution's package, which is 3.2.2 on the runner's Ubuntu. The step fails if that changes, so that the
+      # version tested is known.
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends fpc
+        version=$(fpc -iV)
+        if [ "$version" != 3.2.2 ]; then
+          echo "::error::The fpc package is Free Pascal $version, and the library is tested with 3.2.2."
+          exit 1
+        fi
+    - name: Free Pascal (macOS)
+      if: runner.os == 'macOS'
+      run: brew install fpc
+    - name: Free Pascal (Windows)
+      # The official installer of 3.2.2 that has the 32-bit compiler and the cross compiler to 64-bit Windows
+      # (ppcrossx64), checked against its SHA-256. (Chocolatey's package has the 32-bit compiler alone.) Everything is
+      # built for 64-bit Windows (-Px86_64).
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $installer = Join-Path $env:RUNNER_TEMP 'fpc-3.2.2.win32.and.win64.exe'
+        $url = 'https://downloads.sourceforge.net/project/freepascal/Win32/3.2.2/fpc-3.2.2.win32.and.win64.exe'
+        curl.exe --silent --show-error --fail --location --retry 5 --retry-delay 10 --output $installer $url
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $expected = '8c255390544b051388b577eb61c6191a04883264afe0e3369b3600a56daf7bde'
+        $actual = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+        if ($actual -ne $expected) {
+          Write-Host "::error::The installer's SHA-256 is $actual, not $expected."
+          exit 1
+        }
+        # An Inno Setup installer: silent, into a directory with no spaces.
+        $install = Start-Process -FilePath $installer -Wait -PassThru `
+          -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/DIR=C:\FPC\3.2.2'
+        if ($install.ExitCode -ne 0) { exit $install.ExitCode }
+        $fpc = Get-ChildItem -Path 'C:\FPC\3.2.2' -Recurse -Filter fpc.exe -ErrorAction SilentlyContinue |
+          Select-Object -First 1
+        if ($null -eq $fpc) {
+          Write-Host '::error::fpc.exe is not under C:\FPC\3.2.2.'
+          exit 1
+        }
+        if (-not (Test-Path (Join-Path $fpc.DirectoryName 'ppcrossx64.exe'))) {
+          Write-Host "::error::The cross compiler ppcrossx64.exe is not beside $($fpc.FullName)."
+          exit 1
+        }
+        Add-Content -Path $env:GITHUB_PATH -Value $fpc.DirectoryName
+        Add-Content -Path $env:GITHUB_ENV -Value 'FPC_TARGET=-Px86_64'
+    - name: Free Pascal version and target
+      run: |
+        echo "Free Pascal $(fpc -iV), target $(fpc $FPC_TARGET -iTP)-$(fpc $FPC_TARGET -iTO)"
+        if [ "$RUNNER_OS" = Windows ] && [ "$(fpc $FPC_TARGET -iTP)" != x86_64 ]; then
+          echo "::error::The compiler does not target x86_64."
+          exit 1
+        fi
+    - name: Build
+      # Every unit with the compiler's warnings shown, the tests and the data runner.
+      run: pwsh -NoProfile -File tools/build.ps1 -Options "-O3 $FPC_TARGET"
+    - name: Test
+      run: bin/TestEngine
+    - name: Test with the memory of failed places from the first step
+      if: runner.os == 'Linux'
+      run: bin/TestEngine
+      env:
+        CORVUS_REGEX_MEMO_FROM_THE_START: '1'
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # The Unicode tables and the properties of strings are written from the Rust crate's, at the version this engine
+      # ports.
+      if: runner.os == 'Linux'
+      with:
+        repository: corvus-dotnet/corvus-regex-ecma262-rs
+        ref: f38cece52777ab7e1e8a5e68d609dcad76b35574
+        path: corvus-regex-ecma262-rs
+        persist-credentials: false
+    - name: The generated tables are current
+      if: runner.os == 'Linux'
+      shell: pwsh
+      run: |
+        ./tools/unicode/gen-ucd-tables.ps1 -CrateTables corvus-regex-ecma262-rs/corvus-regex-ecma262/src/tables_gen.rs -Check
+        ./tools/unicode/gen-strings.ps1 -CrateStrings corvus-regex-ecma262-rs/corvus-regex-ecma262/src/strings_gen.rs -Check
+    - name: The version is stamped
+      # What a release does before it tags (tools/release/stamp.ps1), with a tag no release has, so that a moved or
+      # renamed placeholder fails here and not in a release.
+      if: runner.os == 'Linux'
+      shell: pwsh
+      run: |
+        ./tools/release/stamp.ps1 -Tag v99.98.97
+        if (-not (Select-String -Path src/Corvus.Ecma262.RegularExpressions.pas -SimpleMatch "EcmaRegexVersion = '99.98.97';" -Quiet)) {
+          throw 'the version was not stamped'
+        }
+        git checkout -- src/Corvus.Ecma262.RegularExpressions.pas
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        repository: corvus-dotnet/ecma262-regex-test-data
+        ref: cff0860b7ebc5eb9c801eb9f8cec9d5398688ff2
+        path: ecma262-regex-test-data
+        persist-credentials: false
+    - name: Run the ECMA-262 test data
+      run: bin/run ecma262-regex-test-data/data wrong-cases.tsv --threads 4
+    - name: Run the ECMA-262 test data with the memory of failed places from the first step
+      if: runner.os == 'Linux'
+      run: bin/run ecma262-regex-test-data/data wrong-cases-memo.tsv --threads 4
+      env:
+        CORVUS_REGEX_MEMO_FROM_THE_START: '1'
+    - name: Keep the wrong cases
+      if: failure()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: wrong-cases-${{ matrix.os }}
+        path: wrong-cases*.tsv
+
+  gate:
+    # The one check of this workflow that the ruleset of main requires: it passes when every job above passed (or was
+    # skipped), so a job added here is required with no change to the ruleset.
+    name: CI gate
+    if: always()
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Every job passed
+      env:
+        RESULTS: ${{ toJSON(needs.*.result) }}
+      run: |
+        echo "$RESULTS"
+        if echo "$RESULTS" | grep -qE '"(failure|cancelled)"'; then exit 1; fi

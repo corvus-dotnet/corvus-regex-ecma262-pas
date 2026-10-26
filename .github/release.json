@@ -1,0 +1,21 @@
+{
+  "packages": [
+    {
+      "name": "corvus-regex-ecma262-pas",
+      "tag": "v",
+      "stampedTag": true,
+      "nextVersion": "0.1.0",
+      "paths": [
+        "src/"
+      ],
+      "stamp": [
+        {
+          "file": "src/Corvus.Ecma262.RegularExpressions.pas",
+          "placeholder": "EcmaRegexVersion = '0.0.0';",
+          "with": "EcmaRegexVersion = '{version}';",
+          "count": 1
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+# Releases what a merged pull request changed, unless it is labelled no_release: each package of .github/release.json
+# whose paths changed since its last tag gets the next patch version (tools/release/release.ps1), as a published GitHub
+# release on the merge commit. The workflows that run on a published release then publish it (README.md, Releasing). A
+# pull request labelled no_release releases nothing; its changes ship with the next release. The same file in every
+# repository of the regex engines (keep the copies identical); the design is docs/plan/automatic-releases.md in
+# corvus-dotnet/Corvus.Regex.Ecma262.
+name: auto-release
+on:
+  pull_request:
+    types: [closed]
+    branches:
+    - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event.pull_request.merged && !contains(github.event.pull_request.labels.*.name, 'no_release')
+    name: Release what changed
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        ref: ${{ github.event.pull_request.merge_commit_sha }}
+        persist-credentials: false
+    - name: Fetch main's history and the tags
+      run: git fetch --unshallow --tags origin +refs/heads/main:refs/remotes/origin/main
+    - name: Generate the endjin bot's token
+      # A release made with the workflow's own token would start no other workflow.
+      id: token
+      uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      with:
+        app-id: ${{ secrets.ENDJIN_BOT_APP_ID }}
+        private-key: ${{ secrets.ENDJIN_BOT_PRIVATE_KEY }}
+    - name: Release the packages that changed
+      env:
+        GH_TOKEN: ${{ steps.token.outputs.token }}
+        SHA: ${{ github.event.pull_request.merge_commit_sha }}
+      run: pwsh -NoProfile -File tools/release/release.ps1 -Sha "$SHA"

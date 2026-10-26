@@ -1,0 +1,61 @@
+# Publishes a release. Object Pascal has no package registry, so a release is its tag and the library's source as a
+# .zip and a .tar.gz on the release. auto-release.yml makes the release: a tag v<version> on a commit of the merge
+# with the version written into the public unit (tools/release/stamp.ps1), since main keeps 0.0.0. This builds the
+# archives from that commit and adds them to the release (README.md, Releasing).
+name: pascal-publish
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release's tag (v<version>)
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pascal-publish
+  cancel-in-progress: false
+
+jobs:
+  archives:
+    name: Source archives for ${{ github.event.release.tag_name || inputs.tag }}
+    if: startsWith(github.event.release.tag_name || inputs.tag, 'v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write  # add the archives to the release
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        ref: ${{ github.event.release.tag_name || inputs.tag }}
+        persist-credentials: false
+    - name: The tag's version is in the public unit
+      run: |
+        version="${TAG#v}"
+        grep -qF "EcmaRegexVersion = '$version';" src/Corvus.Ecma262.RegularExpressions.pas \
+          || { echo "::error::src/Corvus.Ecma262.RegularExpressions.pas at $TAG does not have EcmaRegexVersion = '$version'."; exit 1; }
+    - name: Archive the library's source
+      # git archive writes the files of the commit and nothing else, so no build output can be in it. The files are
+      # under corvus-regex-ecma262-pas-<version>/ in both archives: the units and include files of src/, the README
+      # and the LICENSE.
+      run: |
+        version="${TAG#v}"
+        name="corvus-regex-ecma262-pas-$version"
+        mkdir -p "$RUNNER_TEMP/release"
+        git archive --format=tar.gz --prefix="$name/" -o "$RUNNER_TEMP/release/$name.tar.gz" HEAD src LICENSE README.md
+        git archive --format=zip --prefix="$name/" -o "$RUNNER_TEMP/release/$name.zip" HEAD src LICENSE README.md
+        tar -tzf "$RUNNER_TEMP/release/$name.tar.gz" > "$RUNNER_TEMP/files.txt"
+        for file in README.md LICENSE src/Corvus.Ecma262.RegularExpressions.pas src/ecma262.inc \
+            src/Corvus.Ecma262.RegularExpressions.Matcher.inc; do
+          grep -qxF "$name/$file" "$RUNNER_TEMP/files.txt" || { echo "::error::The archive has no $file."; exit 1; }
+        done
+        ls -l "$RUNNER_TEMP/release"
+    - name: Add the archives to the release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh release upload "$TAG" "$RUNNER_TEMP"/release/* --repo "$GITHUB_REPOSITORY" --clobber
