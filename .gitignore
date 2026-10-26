@@ -1,0 +1,10 @@
+*.o
+*.ppu
+*.a
+*.exe
+*.res
+lib/
+bin/
+wrong-cases*.tsv
+.idea/
+.vscode/
