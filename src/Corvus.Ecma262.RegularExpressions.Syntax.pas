@@ -695,8 +695,12 @@ var
   K, Slot, Mask: Int32;
 begin
   if 2 * (NameCount + 1) > Length(NameSlots) then begin
-    // The table is kept at most half full, and made again twice as large.
-    SetLength(NameSlots, 2 * Length(NameSlots) + 16);
+    // The table is kept at most half full, and made again twice as large. Its length is a power of two, so that a
+    // probe masked by it visits every slot.
+    if Length(NameSlots) = 0 then
+      SetLength(NameSlots, 16)
+    else
+      SetLength(NameSlots, 2 * Length(NameSlots));
     for K := 0 to High(NameSlots) do
       NameSlots[K] := -1;
     Mask := High(NameSlots);

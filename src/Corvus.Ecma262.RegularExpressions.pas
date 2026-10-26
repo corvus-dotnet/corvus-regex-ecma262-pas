@@ -275,6 +275,7 @@ uses
   Corvus.Ecma262.RegularExpressions.CharSet,
   Corvus.Ecma262.RegularExpressions.Syntax,
   Corvus.Ecma262.RegularExpressions.Prog,
+  Corvus.Ecma262.RegularExpressions.Dfa,
   Corvus.Ecma262.RegularExpressions.Utf8,
   Corvus.Ecma262.RegularExpressions.Utf16;
 
@@ -287,6 +288,10 @@ type
 
 const
   FlagLetters: string = 'dgimsuvy';
+
+const
+  { What FDfa holds for a pattern that has no automaton. }
+  NoDfa = Pointer(1);
 
 var
   { The default match timeout in nanoseconds, read and written whole. }
@@ -301,11 +306,19 @@ type
     FGroupCount: Int32;
     FGroupNames: array of UTF8String;
     FSearch: TSearch;
+    { The pattern needs no backtracking and is small enough for a linear matcher (Re2Cost), so a test from the start
+      of a text can be answered by the automaton over ASCII (see the Dfa unit). FDfa is nil until the first such test
+      builds it, and then the automaton, or NoDfa for none. }
+    FRegular: Boolean;
+    FDfa: Pointer;
+    function Automaton: TDfa;
     { EnsureCaps builds the program that records every group, on the first match that reports them. }
     procedure EnsureCaps;
     function Text8(const Text: UTF8String): TText8; inline;
     function Checked8(const Text: UTF8String): TText8;
     function Text16(const Text: UnicodeString): TText16; inline;
+    function Test8(const T: TText8; Start: NativeInt): Boolean;
+    function Test16(const T: TText16; Start: NativeInt): Boolean;
     function Match8(const Text: UTF8String; const T: TText8; Start: NativeInt; out Next: NativeInt): TEcmaMatch;
     function Match16(const Text: UnicodeString; Start: NativeInt; out Next: NativeInt): TEcmaMatchW;
     function Exec8(const T: TText8; var Captures: TEcmaCaptures; StartIndex: NativeInt): Boolean;
@@ -755,6 +768,7 @@ begin
         raise EEcmaRegexSyntax.Create(Pattern, E.Message, E.Offset);
     end;
     FGroupCount := Parsed.GroupCount;
+    FRegular := not Parsed.NeedsBacktracking and (Re2Cost(Parsed.Root) <= MaxRe2Cost);
     SetLength(FGroupNames, FGroupCount + 1);
     SetLength(FSearch.Names, System.Length(Parsed.Names));
     for K := 0 to High(Parsed.Names) do begin
@@ -780,10 +794,40 @@ end;
 
 destructor TEcmaRegex.Destroy;
 begin
+  if (FDfa <> nil) and (FDfa <> NoDfa) then
+    TDfa(FDfa).Free;
   if FSearch.Caps <> FSearch.Prog then
     FSearch.Caps.Free;
   FSearch.Prog.Free;
   inherited;
+end;
+
+function TEcmaRegex.Automaton: TDfa;
+var
+  Arena: TNodeArena;
+  Built: Pointer;
+begin
+  Built := FDfa;
+  if Built = nil then begin
+    Arena := TNodeArena.Create;
+    try
+      Built := BuildDfa(ParseWith(FPattern, FSyntax, Arena).Root);
+    finally
+      Arena.Free;
+    end;
+    if Built = nil then
+      Built := NoDfa;
+    // Two threads that race both build the automaton, and the one that loses frees its copy.
+    if InterlockedCompareExchangePointer(FDfa, Built, nil) <> nil then begin
+      if Built <> NoDfa then
+        TDfa(Built).Free;
+      Built := FDfa;
+    end;
+  end;
+  if Built = NoDfa then
+    Result := nil
+  else
+    Result := TDfa(Built);
 end;
 
 procedure TEcmaRegex.EnsureCaps;
@@ -865,25 +909,47 @@ begin
   Result := nil;
 end;
 
-function TEcmaRegex.IsMatch(const Text: UTF8String; StartIndex: NativeInt): Boolean;
+(* Test8 and Test16 report whether the pattern matches at or after Start (at Start alone with the y flag): from the
+  start of an ASCII text by the automaton where the pattern has one, and otherwise by the matcher. *)
+function TEcmaRegex.Test8(const T: TText8; Start: NativeInt): Boolean;
 var
   From, To_: NativeInt;
+  D: TDfa;
 begin
-  Result := ExecSearch8(FSearch, Checked8(Text), StartIndex - 1, FSearch.Sticky, nil, From, To_);
+  if (Start = 0) and not FSearch.Sticky and FRegular then begin
+    D := Automaton;
+    if (D <> nil) and D.IsMatch8(T.P, T.Len, Result) then
+      Exit;
+  end;
+  Result := ExecSearch8(FSearch, T, Start, FSearch.Sticky, nil, From, To_);
+end;
+
+function TEcmaRegex.Test16(const T: TText16; Start: NativeInt): Boolean;
+var
+  From, To_: NativeInt;
+  D: TDfa;
+begin
+  if (Start = 0) and not FSearch.Sticky and FRegular then begin
+    D := Automaton;
+    if (D <> nil) and D.IsMatch16(T.P, T.Len, Result) then
+      Exit;
+  end;
+  Result := ExecSearch16(FSearch, T, Start, FSearch.Sticky, nil, From, To_);
+end;
+
+function TEcmaRegex.IsMatch(const Text: UTF8String; StartIndex: NativeInt): Boolean;
+begin
+  Result := Test8(Checked8(Text), StartIndex - 1);
 end;
 
 function TEcmaRegex.IsMatch(const Text: UnicodeString; StartIndex: NativeInt): Boolean;
-var
-  From, To_: NativeInt;
 begin
-  Result := ExecSearch16(FSearch, Text16(Text), StartIndex - 1, FSearch.Sticky, nil, From, To_);
+  Result := Test16(Text16(Text), StartIndex - 1);
 end;
 
 function TEcmaRegex.IsMatch(const Text: TUtf8Text; StartIndex: NativeInt): Boolean;
-var
-  From, To_: NativeInt;
 begin
-  Result := ExecSearch8(FSearch, Text8(Text.FText), StartIndex - 1, FSearch.Sticky, nil, From, To_);
+  Result := Test8(Text8(Text.FText), StartIndex - 1);
 end;
 
 function TEcmaRegex.Match8(const Text: UTF8String; const T: TText8; Start: NativeInt;

@@ -136,6 +136,21 @@ begin
   Check(Re.Pattern = '(?<year>\d{4})-(?<month>\d{2})', 'the pattern');
 end;
 
+procedure TestManyNames;
+var
+  Pattern: UTF8String;
+  K: Int32;
+  Re: IEcmaRegex;
+begin
+  // The table of names grows several times on the way.
+  Pattern := '';
+  for K := 1 to 200 do
+    Pattern := Pattern + '(?<n' + UTF8String(IntToStr(K)) + '>a)';
+  Re := CompileEcmaRegex(Pattern);
+  Check((Re.GroupCount = 200) and (Re.GroupName(150) = 'n150') and (Re.GroupNumbers('n77')[0] = 77),
+    'two hundred group names');
+end;
+
 procedure TestGroupNotTakingPart;
 var
   M: TEcmaMatch;
@@ -315,6 +330,7 @@ begin
   TestFlags;
   TestCompileErrors;
   TestMatch;
+  TestManyNames;
   TestGroupNotTakingPart;
   TestGlobalSearch;
   TestReplace;
