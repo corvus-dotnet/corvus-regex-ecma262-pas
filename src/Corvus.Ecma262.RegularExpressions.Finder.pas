@@ -127,6 +127,8 @@ type
     I, J: NativeInt;
     MI, VI, MJ, VJ: array[0..3] of UInt64;
     NI, NJ: Int32;
+    { The tests as PairBlockN reads them (VecConsts): the masks and values of I, then of J. }
+    Consts: TBytes;
     { For each of the first bytes of the literals up to PairChecked, the values they hold there. }
     Sets: array of TByteSet;
     { The literals are every sequence of the values Sets holds, all of one length (a word's cases written out): a
@@ -372,7 +374,7 @@ end;
 function TFirstsFinder.Find(P: PByte; From, End_: NativeInt; out S, E: NativeInt): Boolean;
 var
   At, Q, Start, L: NativeInt;
-  Lits: TByteLists;
+  Lits: ^TByteLists;
 begin
   At := From + K;
   while At < End_ do begin
@@ -387,11 +389,11 @@ begin
       Break;
     Start := Q - K;
     // A byte of the range no literal holds there has no literals.
-    Lits := ByValue[P[Q]];
-    for L := 0 to High(Lits) do
-      if StartsWith(P, Start, End_, @Lits[L][0], Length(Lits[L])) then begin
+    Lits := @ByValue[P[Q]];
+    for L := 0 to High(Lits^) do
+      if StartsWith(P, Start, End_, @Lits^[L][0], Length(Lits^[L])) then begin
         S := Start;
-        E := Start + Length(Lits[L]);
+        E := Start + Length(Lits^[L]);
         Exit(True);
       end;
     At := Q + 1;
@@ -454,6 +456,7 @@ end;
   two of their positions take PairMostTests tests or fewer each. }
 function BuildPairFinder(const Literals: TByteLists; const Ranks: TRanks): TPairFinder;
 var
+  Pairs: TBytes;
   Shortest, X, Y, BI, BJ, Checked, K, L: NativeInt;
   Values: array of TBytes;
   Tests: array of TBytes;
@@ -547,6 +550,12 @@ begin
   F.Every := F.Every and (Product = Length(Literals));
   Broadcast(Tests[BI], F.MI, F.VI, F.NI);
   Broadcast(Tests[BJ], F.MJ, F.VJ, F.NJ);
+  SetLength(Pairs, Length(Tests[BI]) + Length(Tests[BJ]));
+  for K := 0 to High(Tests[BI]) do
+    Pairs[K] := Tests[BI][K];
+  for K := 0 to High(Tests[BJ]) do
+    Pairs[Length(Tests[BI]) + K] := Tests[BJ][K];
+  VecConsts(Pairs, F.Consts);
   Result := F;
 end;
 
@@ -567,21 +576,6 @@ begin
     if StartsWith(P, At, End_, @Literals[L][0], Length(Literals[L])) then
       Exit(At + Length(Literals[L]));
   Result := -1;
-end;
-
-{ Pass is the lanes of a word that pass the tests (N of them, up to four), by the cheap test of HasZero, which may
-  flag a lane that does not pass but never misses one: every candidate is compared with the literals. }
-function Pass(X: UInt64; const M, V: array of UInt64; N: Int32): UInt64; inline;
-begin
-  Result := HasZero((X or M[0]) xor V[0]);
-  if N > 1 then begin
-    Result := Result or HasZero((X or M[1]) xor V[1]);
-    if N > 2 then begin
-      Result := Result or HasZero((X or M[2]) xor V[2]);
-      if N > 3 then
-        Result := Result or HasZero((X or M[3]) xor V[3]);
-    end;
-  end;
 end;
 
 function TPairFinder.Find(P: PByte; From, End_: NativeInt; out S, E: NativeInt): Boolean;
@@ -628,23 +622,30 @@ begin
       At := Q + 16;
     end;
     S := -1;
-  end else
-    while At <= Blocks do begin
-      M := Pass(Word8(P, At + I), MI, VI, NI) and Pass(Word8(P, At + J), MJ, VJ, NJ);
-      while M <> 0 do begin
-        Q := At + Lane(M);
-        if Q <= Last then begin
-          EndAt := LiteralAt(P, Q, End_);
+  end else begin
+    // Sixteen starts a block with several tests a position (PairBlockN).
+    Last16 := End_ - 16 - Far;
+    while At <= Last16 do begin
+      Q := PairBlockN(P, At, Last16, I, J, @Consts[0], NI, NJ, Lanes);
+      if Q < 0 then begin
+        Inc(At, ((Last16 - At) div 16 + 1) * 16);
+        Break;
+      end;
+      while Lanes <> 0 do begin
+        S := Q + NativeInt(BsfDWord(Lanes));
+        if S <= Last then begin
+          EndAt := LiteralAt(P, S, End_);
           if EndAt >= 0 then begin
-            S := Q;
             E := EndAt;
             Exit(True);
           end;
         end;
-        M := M and (M - 1);
+        Lanes := Lanes and (Lanes - 1);
       end;
-      Inc(At, 8);
+      At := Q + 16;
     end;
+    S := -1;
+  end;
   while At <= Last do begin
     EndAt := LiteralAt(P, At, End_);
     if EndAt >= 0 then begin
@@ -692,16 +693,18 @@ end;
 function TTableFinder.Find(P: PByte; From, End_: NativeInt; out S, E: NativeInt): Boolean;
 var
   Last, Q, L: NativeInt;
-  Lits: TByteLists;
+  Lits: ^TByteLists;
 begin
   Last := End_ - Shortest;
+  // Q + K is below End_ for every Q up to Last.
   for Q := From to Last do
-    if InSet(At, P[Q + K]) then begin
-      Lits := ByFirst[P[Q]];
-      for L := 0 to High(Lits) do
-        if StartsWith(P, Q, End_, @Lits[L][0], Length(Lits[L])) then begin
+    if ((At[P[Q + K] shr 6] shr (P[Q + K] and 63)) and 1) <> 0 then begin
+      // A pointer to the literals of the byte, so that reading them copies nothing.
+      Lits := @ByFirst[P[Q]];
+      for L := 0 to High(Lits^) do
+        if StartsWith(P, Q, End_, @Lits^[L][0], Length(Lits^[L])) then begin
           S := Q;
-          E := Q + Length(Lits[L]);
+          E := Q + Length(Lits^[L]);
           Exit(True);
         end;
     end;

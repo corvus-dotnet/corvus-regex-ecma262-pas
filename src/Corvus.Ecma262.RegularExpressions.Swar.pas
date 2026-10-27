@@ -12,6 +12,9 @@ unit Corvus.Ecma262.RegularExpressions.Swar;
 
 interface
 
+uses
+  SysUtils;
+
 {$IFDEF ENDIAN_BIG}
   {$ERROR The searches read words of the text in little-endian order.}
 {$ENDIF}
@@ -55,6 +58,20 @@ function StartsWith(P: PByte; At, End_: NativeInt; Lit: PByte; Len: NativeInt): 
   checks that every byte read, up to Last + Max(I, J) + 15, lies within the text. Over x86_64 it reads sixteen bytes
   at a time with SSE2, and over any other processor eight at a time as words. }
 function PairBlock(P: PByte; At, Last, I, J: NativeInt; MI, VI, MJ, VJ: UInt64; out Lanes: UInt32): NativeInt;
+
+{ PairBlockN is PairBlock with NI tests of position I and NJ of position J (each from one to four), a start passing
+  when one test of each passes. Consts holds sixteen bytes of each mask and then of its value, the tests of I first:
+  32 * (NI + NJ) bytes (see VecConsts). }
+function PairBlockN(P: PByte; At, Last, I, J: NativeInt; Consts: PByte; NI, NJ: Int32; out Lanes: UInt32): NativeInt;
+
+{ IndexRanges is the first position at or after From and before N whose byte is in one of NR ranges (from one to
+  four), or -1. Consts holds sixteen bytes of each range's least byte and then of its width (greatest less least):
+  32 * NR bytes (see VecConsts). }
+function IndexRanges(P: PByte; From, N: NativeInt; Consts: PByte; NR: Int32): NativeInt;
+
+{ VecConsts writes the pairs of bytes Pairs (a mask and a value, or a least byte and a width), each pair as sixteen
+  copies of the one and then sixteen of the other, for PairBlockN and IndexRanges. }
+procedure VecConsts(const Pairs: array of Byte; var Consts: TBytes);
 
 { IndexUnit is the first position at or after From and before N whose UTF-16 unit is V, or -1. }
 function IndexUnit(P: PUInt16; From, N: NativeInt; V: UInt16): NativeInt;
@@ -353,6 +370,123 @@ begin
   Result := At + R;
 end;
 
+{ VecRanges passes a byte in one of NR ranges, whose least bytes and widths Consts holds as VecConsts writes them. }
+function VecRanges(Base: PByte; Blocks: NativeInt; Consts: PByte; NR: Int32): NativeInt;
+var
+  LBase, LConsts: PByte;
+  LBlocks, LNR, R: NativeInt;
+begin
+  LBase := Base;
+  LBlocks := Blocks;
+  LConsts := Consts;
+  LNR := NR;
+  R := -1;
+  if LBlocks > 0 then
+    asm
+      mov rdx, LBase
+      mov rcx, LBlocks
+      xor r8, r8
+    @block:
+      pxor xmm0, xmm0
+      mov r10, LConsts
+      mov r11, LNR
+    @range:
+      movdqu xmm1, [rdx + r8]
+      movdqu xmm2, [r10]
+      psubb xmm1, xmm2
+      movdqu xmm2, [r10 + 16]
+      movdqa xmm3, xmm1
+      pminub xmm3, xmm2
+      pcmpeqb xmm1, xmm3
+      por xmm0, xmm1
+      add r10, 32
+      dec r11
+      jnz @range
+      pmovmskb eax, xmm0
+      test eax, eax
+      jnz @found
+      add r8, 16
+      dec rcx
+      jnz @block
+      jmp @done
+    @found:
+      bsf eax, eax
+      add rax, r8
+      mov R, rax
+    @done:
+    end ['rax', 'rcx', 'rdx', 'r8', 'r10', 'r11', 'xmm0', 'xmm1', 'xmm2', 'xmm3'];
+  Result := R;
+end;
+
+function PairBlockN(P: PByte; At, Last, I, J: NativeInt; Consts: PByte; NI, NJ: Int32; out Lanes: UInt32): NativeInt;
+var
+  LPI, LPJ, LCI, LCJ: PByte;
+  LBlocks, LNI, LNJ, R: NativeInt;
+  LMask: UInt32;
+begin
+  Lanes := 0;
+  if At > Last then
+    Exit(-1);
+  LPI := @P[At + I];
+  LPJ := @P[At + J];
+  LBlocks := (Last - At) div 16 + 1;
+  LCI := Consts;
+  LCJ := @Consts[32 * NI];
+  LNI := NI;
+  LNJ := NJ;
+  R := -1;
+  LMask := 0;
+  asm
+    mov rdx, LPI
+    mov r9, LPJ
+    mov rcx, LBlocks
+    xor r8, r8
+  @block:
+    pxor xmm0, xmm0
+    mov r10, LCI
+    mov r11, LNI
+  @ti:
+    movdqu xmm2, [rdx + r8]
+    movdqu xmm3, [r10]
+    por xmm2, xmm3
+    movdqu xmm3, [r10 + 16]
+    pcmpeqb xmm2, xmm3
+    por xmm0, xmm2
+    add r10, 32
+    dec r11
+    jnz @ti
+    pxor xmm1, xmm1
+    mov r10, LCJ
+    mov r11, LNJ
+  @tj:
+    movdqu xmm2, [r9 + r8]
+    movdqu xmm3, [r10]
+    por xmm2, xmm3
+    movdqu xmm3, [r10 + 16]
+    pcmpeqb xmm2, xmm3
+    por xmm1, xmm2
+    add r10, 32
+    dec r11
+    jnz @tj
+    pand xmm0, xmm1
+    pmovmskb eax, xmm0
+    test eax, eax
+    jnz @found
+    add r8, 16
+    dec rcx
+    jnz @block
+    jmp @done
+  @found:
+    mov LMask, eax
+    mov R, r8
+  @done:
+  end ['rax', 'rcx', 'rdx', 'r8', 'r9', 'r10', 'r11', 'xmm0', 'xmm1', 'xmm2', 'xmm3'];
+  if R < 0 then
+    Exit(-1);
+  Lanes := LMask;
+  Result := At + R;
+end;
+
 {$ELSE}
 
 function PairBlock(P: PByte; At, Last, I, J: NativeInt; MI, VI, MJ, VJ: UInt64; out Lanes: UInt32): NativeInt;
@@ -374,6 +508,34 @@ begin
       end;
       Exit(At);
     end;
+    Inc(At, 16);
+  end;
+  Lanes := 0;
+  Result := -1;
+end;
+
+function PairBlockN(P: PByte; At, Last, I, J: NativeInt; Consts: PByte; NI, NJ: Int32; out Lanes: UInt32): NativeInt;
+var
+  S, T: NativeInt;
+  OkI, OkJ: Boolean;
+begin
+  // A start at a time, over the first byte of each sixteen of the constants.
+  while At <= Last do begin
+    Lanes := 0;
+    for S := 0 to 15 do begin
+      OkI := False;
+      for T := 0 to NI - 1 do
+        if (P[At + S + I] or Consts[32 * T]) = Consts[32 * T + 16] then
+          OkI := True;
+      OkJ := False;
+      for T := NI to NI + NJ - 1 do
+        if (P[At + S + J] or Consts[32 * T]) = Consts[32 * T + 16] then
+          OkJ := True;
+      if OkI and OkJ then
+        Lanes := Lanes or (UInt32(1) shl S);
+    end;
+    if Lanes <> 0 then
+      Exit(At);
     Inc(At, 16);
   end;
   Lanes := 0;
@@ -525,6 +687,35 @@ begin
       Exit(At);
     Inc(At);
   end;
+  Result := -1;
+end;
+
+procedure VecConsts(const Pairs: array of Byte; var Consts: TBytes);
+var
+  K: NativeInt;
+begin
+  SetLength(Consts, 16 * Length(Pairs));
+  for K := 0 to High(Pairs) do
+    FillChar(Consts[16 * K], 16, Pairs[K]);
+end;
+
+function IndexRanges(P: PByte; From, N: NativeInt; Consts: PByte; NR: Int32): NativeInt;
+var
+  At: NativeInt;
+  T: Int32;
+begin
+  {$IFDEF CPUX86_64}
+  if N - From >= 16 then begin
+    At := VecRanges(@P[From], (N - From) div 16, Consts, NR);
+    if At >= 0 then
+      Exit(From + At);
+    Inc(From, ((N - From) div 16) * 16);
+  end;
+  {$ENDIF}
+  for At := From to N - 1 do
+    for T := 0 to NR - 1 do
+      if Byte(P[At] - Consts[32 * T]) <= Consts[32 * T + 16] then
+        Exit(At);
   Result := -1;
 end;
 

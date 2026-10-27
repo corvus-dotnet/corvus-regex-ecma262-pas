@@ -422,6 +422,8 @@ begin
   end;
   if F^.IsRange then
     Exit(IndexBetween(T.P, At, N, F^.Lo, F^.Hi));
+  if F^.NRanges > 0 then
+    Exit(IndexRanges(T.P, At, N, @F^.RangeConsts[0], F^.NRanges));
   for K := At to N - 1 do
     if ((F^.Table[T.P[K] shr 6] shr (T.P[K] and 63)) and 1) <> 0 then
       Exit(K);

@@ -25,6 +25,7 @@ uses
   Corvus.Ecma262.RegularExpressions.CharSet,
   Corvus.Ecma262.RegularExpressions.Syntax,
   Corvus.Ecma262.RegularExpressions.Literals,
+  Corvus.Ecma262.RegularExpressions.Swar,
   Corvus.Ecma262.RegularExpressions.Adfa;
 
 type
@@ -79,6 +80,12 @@ type
     IsRange: Boolean;
     Lo, Hi: Byte;
     Table: array[0..3] of UInt64;
+    { Up to four ranges that hold every byte, and maybe more: the runs of the ASCII bytes, and one run from the least
+      to the greatest lead byte of the others (every byte between is a lead byte too, so a candidate is never inside
+      a character). A candidate is tested against the first set, so a byte too many costs a test and nothing else.
+      RangeConsts are the ranges as IndexRanges reads them; NRanges is 0 when there are more. }
+    NRanges: Int32;
+    RangeConsts: TBytes;
   end;
 
   TFormsList = array of TRuneLists;
@@ -256,6 +263,7 @@ var
   K, Sp, X, Y, B, N: Int32;
   Lo, Hi: Int32;
   List: array[0..255] of Byte;
+  Pairs: TBytes;
 begin
   F := Default(TFirstBytes);
   FillChar(List, SizeOf(List), 0);
@@ -296,6 +304,34 @@ begin
   F.Lo := List[0];
   F.Hi := List[N - 1];
   F.IsRange := (N > 4) and (F.Hi < $80) and (F.Hi - F.Lo = N - 1);
+  if (N > 4) and not F.IsRange then begin
+    // The runs of the ASCII bytes, then the lead bytes as one run.
+    SetLength(Pairs, 0);
+    B := 0;
+    while B < $80 do begin
+      if ((F.Table[B shr 6] shr (B and 63)) and 1) <> 0 then begin
+        X := B;
+        while (B + 1 < $80) and (((F.Table[(B + 1) shr 6] shr ((B + 1) and 63)) and 1) <> 0) do
+          Inc(B);
+        SetLength(Pairs, Length(Pairs) + 2);
+        Pairs[High(Pairs) - 1] := X;
+        Pairs[High(Pairs)] := B - X;
+      end;
+      Inc(B);
+    end;
+    if F.Hi >= $80 then begin
+      X := $80;
+      while ((F.Table[X shr 6] shr (X and 63)) and 1) = 0 do
+        Inc(X);
+      SetLength(Pairs, Length(Pairs) + 2);
+      Pairs[High(Pairs) - 1] := X;
+      Pairs[High(Pairs)] := F.Hi - X;
+    end;
+    if Length(Pairs) <= 8 then begin
+      F.NRanges := Length(Pairs) div 2;
+      VecConsts(Pairs, F.RangeConsts);
+    end;
+  end;
   Result := True;
 end;
 
