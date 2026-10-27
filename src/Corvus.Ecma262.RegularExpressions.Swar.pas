@@ -83,6 +83,16 @@ function TeddyBlock(P: PByte; At, Last: NativeInt; Tab: PByte; out Lanes: UInt32
 { HasSsse3 reports whether the processor has SSSE3, whose byte shuffle TeddyBlock reads its tables with. }
 function HasSsse3: Boolean;
 
+{ Eq2Block finds the first block of sixty-four starts, from the start At by steps of sixty-four up to (not past)
+  Last, at which a start S has P[S + I] = A and P[S + J] = B (memchr's search for the two rarest bytes of a needle,
+  packedpair): it returns that block's first start and the lanes in Lanes (bit k for the start + k), or -1. The caller
+  checks that every byte read, up to Last + Max(I, J) + 63, lies within the text. It takes AVX2 (HasAvx2), and over
+  any other processor tests a start at a time. }
+function Eq2Block(P: PByte; At, Last, I, J: NativeInt; A, B: Byte; out Lanes: UInt64): NativeInt;
+
+{ HasAvx2 reports whether the processor has AVX2 and the system saves its registers. }
+function HasAvx2: Boolean;
+
 { VecConsts writes the pairs of bytes Pairs (a mask and a value, or a least byte and a width), each pair as sixteen
   copies of the one and then sixteen of the other, for PairBlockN and IndexRanges. }
 procedure VecConsts(const Pairs: array of Byte; var Consts: TBytes);
@@ -176,6 +186,50 @@ begin
       add rax, r8
       mov R, rax
     @done:
+    end ['rax', 'rcx', 'rdx', 'r8', 'r9', 'xmm0', 'xmm1', 'xmm2', 'xmm3'];
+  Result := R;
+end;
+
+{ VecEq1Avx2 is VecEq1 with AVX2: two blocks of thirty-two a step, Blocks the number of steps of sixty-four bytes. }
+function VecEq1Avx2(Base: PByte; Blocks: NativeInt; A: UInt64): NativeInt;
+var
+  LBase: PByte;
+  LBlocks, R: NativeInt;
+  LA: UInt64;
+begin
+  LBase := Base;
+  LBlocks := Blocks;
+  LA := A;
+  R := -1;
+  if LBlocks > 0 then
+    asm
+      mov rdx, LBase
+      mov rcx, LBlocks
+      mov rax, LA
+      vmovq xmm1, rax
+      vpbroadcastb ymm1, xmm1
+      xor r8, r8
+    @loop:
+      vpcmpeqb ymm0, ymm1, [rdx + r8]
+      vpcmpeqb ymm3, ymm1, [rdx + r8 + 32]
+      vpor ymm2, ymm0, ymm3
+      vpmovmskb eax, ymm2
+      test eax, eax
+      jnz @found
+      add r8, 64
+      dec rcx
+      jnz @loop
+      jmp @done
+    @found:
+      vpmovmskb eax, ymm0
+      vpmovmskb r9d, ymm3
+      shl r9, 32
+      or rax, r9
+      bsf rax, rax
+      add rax, r8
+      mov R, rax
+    @done:
+      vzeroupper
     end ['rax', 'rcx', 'rdx', 'r8', 'r9', 'xmm0', 'xmm1', 'xmm2', 'xmm3'];
   Result := R;
 end;
@@ -618,6 +672,31 @@ begin
   Result := (R and (UInt32(1) shl 9)) <> 0;
 end;
 
+{ DetectAvx2 reports whether the processor has AVX2 and the system saves the YMM registers (OSXSAVE, then XCR0). }
+function DetectAvx2: Boolean;
+var
+  C1, B7, X: UInt32;
+begin
+  asm
+    mov eax, 1
+    xor ecx, ecx
+    cpuid
+    mov C1, ecx
+    mov eax, 7
+    xor ecx, ecx
+    cpuid
+    mov B7, ebx
+  end ['rax', 'rbx', 'rcx', 'rdx'];
+  if (C1 and (UInt32(1) shl 27)) = 0 then
+    Exit(False);
+  asm
+    xor ecx, ecx
+    xgetbv
+    mov X, eax
+  end ['rax', 'rcx', 'rdx'];
+  Result := ((X and 6) = 6) and ((B7 and (UInt32(1) shl 5)) <> 0);
+end;
+
 function TeddyBlock(P: PByte; At, Last: NativeInt; Tab: PByte; out Lanes: UInt32): NativeInt;
 var
   LP, LTab: PByte;
@@ -691,11 +770,90 @@ begin
   Result := At + R;
 end;
 
+function Eq2Block(P: PByte; At, Last, I, J: NativeInt; A, B: Byte; out Lanes: UInt64): NativeInt;
+var
+  LPI, LPJ: PByte;
+  LBlocks, R: NativeInt;
+  LA, LB, LMask: UInt64;
+begin
+  Lanes := 0;
+  if At > Last then
+    Exit(-1);
+  LPI := @P[At + I];
+  LPJ := @P[At + J];
+  LBlocks := (Last - At) div 64 + 1;
+  LA := Broadcast8(A);
+  LB := Broadcast8(B);
+  R := -1;
+  LMask := 0;
+  asm
+    mov rdx, LPI
+    mov r9, LPJ
+    mov rcx, LBlocks
+    mov rax, LA
+    vmovq xmm1, rax
+    vpbroadcastb ymm1, xmm1
+    mov rax, LB
+    vmovq xmm4, rax
+    vpbroadcastb ymm4, xmm4
+    xor r8, r8
+  @loop:
+    vpcmpeqb ymm0, ymm1, [rdx + r8]
+    vpcmpeqb ymm2, ymm4, [r9 + r8]
+    vpand ymm0, ymm0, ymm2
+    vpcmpeqb ymm3, ymm1, [rdx + r8 + 32]
+    vpcmpeqb ymm2, ymm4, [r9 + r8 + 32]
+    vpand ymm3, ymm3, ymm2
+    vpor ymm2, ymm0, ymm3
+    vptest ymm2, ymm2
+    jnz @found
+    add r8, 64
+    dec rcx
+    jnz @loop
+    jmp @done
+  @found:
+    vpmovmskb eax, ymm0
+    vpmovmskb r10d, ymm3
+    shl r10, 32
+    or rax, r10
+    mov LMask, rax
+    mov R, r8
+  @done:
+    vzeroupper
+  end ['rax', 'rcx', 'rdx', 'r8', 'r9', 'r10', 'xmm0', 'xmm1', 'xmm2', 'xmm3', 'xmm4'];
+  if R < 0 then
+    Exit(-1);
+  Lanes := LMask;
+  Result := At + R;
+end;
+
 {$ELSE}
 
 function DetectSsse3: Boolean;
 begin
   Result := False;
+end;
+
+function DetectAvx2: Boolean;
+begin
+  Result := False;
+end;
+
+function Eq2Block(P: PByte; At, Last, I, J: NativeInt; A, B: Byte; out Lanes: UInt64): NativeInt;
+var
+  S: NativeInt;
+begin
+  while At <= Last do begin
+    Lanes := 0;
+    for S := 0 to 63 do
+      if (P[At + S + I] = A) and (P[At + S + J] = B) then
+        Lanes := Lanes or (UInt64(1) shl S);
+    if Lanes <> 0 then
+      Exit(At);
+    Inc(At, 64);
+  end;
+  Lanes := 0;
+  Result := -1;
 end;
 
 function TeddyBlock(P: PByte; At, Last: NativeInt; Tab: PByte; out Lanes: UInt32): NativeInt;
@@ -726,11 +884,16 @@ end;
 {$ENDIF}
 
 var
-  Ssse3: Boolean;
+  Ssse3, Avx2: Boolean;
 
 function HasSsse3: Boolean;
 begin
   Result := Ssse3;
+end;
+
+function HasAvx2: Boolean;
+begin
+  Result := Avx2;
 end;
 
 function IndexByte1(P: PByte; From, N: NativeInt; B: Byte): NativeInt;
@@ -740,13 +903,14 @@ begin
   if From >= N then
     Exit(-1);
   {$IFDEF CPUX86_64}
-  // The run-time library's search over the first 256 bytes, which starts sooner for a byte close by (the ends of
-  // lines), then 32 bytes a step.
-  if N - From >= 288 then begin
-    K := IndexByte(P[From], 256, B);
+  // Sixty-four bytes a step with AVX2, then thirty-two with SSE2, then the run-time library's search for the rest.
+  if Avx2 and (N - From >= 64) then begin
+    K := VecEq1Avx2(@P[From], (N - From) div 64, Broadcast8(B));
     if K >= 0 then
       Exit(From + K);
-    Inc(From, 256);
+    Inc(From, ((N - From) div 64) * 64);
+  end;
+  if N - From >= 32 then begin
     K := VecEq1(@P[From], (N - From) div 32, Broadcast8(B));
     if K >= 0 then
       Exit(From + K);
@@ -1022,5 +1186,6 @@ end;
 
 initialization
   Ssse3 := DetectSsse3;
+  Avx2 := DetectAvx2;
 
 end.

@@ -320,8 +320,9 @@ end;
 
 procedure TestRareLiteral;
 const
-  Literals: array[0..5] of UTF8String = ('zqj', 'aqj', 'qq', 'Xa', 'abZ', 'jj j');
-  Letters: AnsiString = 'abqjzZX ';
+  // Twain, Tw and aIa are searched for with a second byte (a T or an I is common), over texts longer than a block.
+  Literals: array[0..8] of UTF8String = ('zqj', 'aqj', 'qq', 'Xa', 'abZ', 'jj j', 'Twain', 'Tw', 'aIa');
+  Letters: AnsiString = 'abqjzZX TwinI';
 var
   L, R, K, N, I: NativeInt;
   Re: IEcmaRegex;
@@ -334,10 +335,10 @@ begin
   for L := 0 to High(Literals) do begin
     Re := CompileEcmaRegex(Literals[L], 'g');
     for R := 1 to 200 do begin
-      N := Next mod 200;
+      N := Next mod 400;
       SetLength(Text, N);
       for K := 1 to N do
-        Text[K] := Letters[1 + Next mod 8];
+        Text[K] := Letters[1 + Next mod NativeUInt(Length(Letters))];
       Want := nil;
       I := Pos(Literals[L], Text);
       while I > 0 do begin
@@ -360,6 +361,13 @@ begin
         CompareMem(@Got16[0], @Want[0], Length(Want) * SizeOf(NativeInt)))),
         Format('the literal %s in %s', [Literals[L], Text]));
     end;
+  end;
+  // Twain at every offset of the first blocks of its search (Eq2Block): each lane of a block finds it.
+  Re := CompileEcmaRegex('Twain', '');
+  for K := 0 to 140 do begin
+    Text := UTF8String(StringOfChar('a', K)) + 'Twain' + UTF8String(StringOfChar('T', 200 - K));
+    M := Re.Match(Text);
+    Check(M.Success and (M.Index = K + 1), Format('Twain at %d', [K]));
   end;
 end;
 

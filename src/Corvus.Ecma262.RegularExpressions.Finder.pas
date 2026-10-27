@@ -76,6 +76,8 @@ const
   PairMostTests = 4;
   { The most bytes of the literals looked at before they are compared one by one. }
   PairChecked = 16;
+  // The least share of text (UnitShare) of the rare byte of one literal searched for with a second byte (Eq2Block).
+  PairShare = 25;
 
 var
   UnitShares: array[0..127] of Int32;
@@ -95,6 +97,9 @@ type
   public
     Literal: TBytes;
     K: NativeInt;
+    { The literal's next rarest byte of another value, tested with the byte at K where the processor has AVX2 and
+      the byte at K is common (PairShare), or -1. }
+    K2: NativeInt;
     function Find(P: PByte; From, End_: NativeInt; out S, E: NativeInt): Boolean; override;
   end;
 
@@ -294,10 +299,38 @@ end;
 function TRareFinder.Find(P: PByte; From, End_: NativeInt; out S, E: NativeInt): Boolean;
 var
   B: Byte;
-  At, Q, Start: NativeInt;
+  At, Q, Start, Last64, Far: NativeInt;
+  Lanes: UInt64;
 begin
   B := Literal[K];
   At := From + K;
+  if K2 >= 0 then begin
+    // Sixty-four starts a block with the two bytes tested together (Eq2Block): its lanes are candidates, each
+    // compared with the literal.
+    Far := K;
+    if K2 > Far then
+      Far := K2;
+    Start := From;
+    Last64 := End_ - 64 - Far;
+    while Start <= Last64 do begin
+      Q := Eq2Block(P, Start, Last64, K, K2, B, Literal[K2], Lanes);
+      if Q < 0 then begin
+        Inc(Start, ((Last64 - Start) div 64 + 1) * 64);
+        Break;
+      end;
+      while Lanes <> 0 do begin
+        At := Q + NativeInt(BsfQWord(Lanes));
+        if StartsWith(P, At, End_, @Literal[0], Length(Literal)) then begin
+          S := At;
+          E := At + Length(Literal);
+          Exit(True);
+        end;
+        Lanes := Lanes and (Lanes - 1);
+      end;
+      Start := Q + 64;
+    end;
+    At := Start + K;
+  end;
   while At < End_ do begin
     Q := IndexByte1(P, At, End_, B);
     if Q < 0 then
@@ -846,7 +879,7 @@ end;
 function BuildByteFinder(const Literals: TByteLists; const Rank: TRanks): TByteFinder;
 var
   Pair: TPairFinder;
-  Best: NativeInt;
+  Best, K: NativeInt;
   One: TOneFinder;
   Rare: TRareFinder;
 begin
@@ -865,6 +898,16 @@ begin
       Rare := TRareFinder.Create;
       Rare.Literal := Literals[0];
       Rare.K := Best;
+      Rare.K2 := -1;
+      // A byte as common as a capital T leaves many starts that are not the literal, which a second byte turns away
+      // in the same pass; a rarer one is searched for alone, which reads half as much. A literal of three bytes or
+      // fewer is a word as common as its capital (nearly every T of English text begins The), so a second byte
+      // turns few starts away, as the Julia engine rules (vector_alone).
+      if HasAvx2 and (UnitShare(Literals[0][Best]) >= PairShare) and (Length(Literals[0]) > 3) then
+        for K := 0 to High(Literals[0]) do
+          if (Literals[0][K] <> Literals[0][Best]) and
+            ((Rare.K2 < 0) or (Rank[Literals[0][K]] < Rank[Literals[0][Rare.K2]])) then
+            Rare.K2 := K;
       Exit(Rare);
     end;
     Result := BuildPairFinder(Literals, Rank);
