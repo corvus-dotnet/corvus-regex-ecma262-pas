@@ -281,11 +281,25 @@ end;
   of a window none of whose positions it can be. }
 function SkipAhead(S: TSkipWin; const T: TText; At: NativeInt): NativeInt;
 var
-  N: NativeInt;
+  N, Hi, Len, Lo, Q: NativeInt;
+  P: PUnit;
 begin
   N := T.Len;
-  while (At + S.Hi < N) and not S.Hit(U(T, At + S.Hi)) do
-    Inc(At, S.Len);
+  Hi := S.Hi;
+  Len := S.Len;
+  P := T.P;
+  if (SizeOf(TUnit) = 1) and (S.NRanges > 0) and (Len <= 64) and (At + Hi < N) then begin
+    // Over UTF-8, the first run of bytes the window holds as long as the window, from At's place Lo (IndexRun): a
+    // start has a byte the window holds at each place from Lo to Hi.
+    Lo := Hi - Len + 1;
+    Q := IndexRun(PByte(P), At + Lo, N, @S.RangeConsts[0], S.NRanges, Len);
+    if Q >= 0 then
+      Exit(Q - Lo);
+    Exit(At + ((N - Hi - At + Len - 1) div Len) * Len);
+  end;
+  // At + Hi is below the length of the text at each read.
+  while (At + Hi < N) and not S.Hit(P[At + Hi]) do
+    Inc(At, Len);
   Result := At;
 end;
 
@@ -905,8 +919,28 @@ function EndOfRun(Prog: TProgram; const CS: TCharSet; const T: TText; At: Native
 var
   C: UInt32;
   R: Int32;
-  W: NativeInt;
+  W, N: NativeInt;
+  P: PUnit;
+  A0, A1: UInt64;
 begin
+  // The ASCII members a unit at a time with the set's two words in registers: At is below the length at each read.
+  N := T.Len;
+  P := T.P;
+  A0 := CS.Ascii[0];
+  A1 := CS.Ascii[1];
+  if (At < 0) or (At > N) then
+    RaiseRange;
+  while At < N do begin
+    C := P[At];
+    if C >= $80 then
+      Break;
+    if C < 64 then begin
+      if ((A0 shr C) and 1) = 0 then
+        Exit(At);
+    end else if ((A1 shr (C - 64)) and 1) = 0 then
+      Exit(At);
+    Inc(At);
+  end;
   while At < T.Len do begin
     C := U(T, At);
     if C < $80 then begin

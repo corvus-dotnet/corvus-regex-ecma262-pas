@@ -409,7 +409,7 @@ end;
 function FirstFind(Prog: TProgram; const T: TText; At: NativeInt): NativeInt;
 var
   F: ^TFirstBytes;
-  N, K: NativeInt;
+  N, K, E: NativeInt;
 begin
   if not Prog.Search.HasFirstBytes then
     Exit(At);
@@ -418,8 +418,22 @@ begin
   case F^.Count of
     1: Exit(IndexByte1(T.P, At, N, F^.A));
     2: Exit(IndexByte2(T.P, At, N, F^.A, F^.B));
-    3: Exit(IndexByte4(T.P, At, N, F^.A, F^.B, F^.C, F^.C));
+    3, 4: Exit(IndexByte4(T.P, At, N, F^.A, F^.B, F^.C, F^.D));
   end;
+  // More than four first bytes are a class (a word's letters, which the next word starts with a byte or two on): the
+  // next four bytes by the table, before a vector search is set up.
+  E := At + 4;
+  if E > N then
+    E := N;
+  for K := At to E - 1 do
+    if ((F^.Table[T.P[K] shr 6] shr (T.P[K] and 63)) and 1) <> 0 then
+      Exit(K);
+  if E > At then
+    At := E;
+  if F^.IsRange then
+    Exit(IndexBetween(T.P, At, N, F^.Lo, F^.Hi));
+  if F^.NRanges > 0 then
+    Exit(IndexRanges(T.P, At, N, @F^.RangeConsts[0], F^.NRanges));
   for K := At to N - 1 do
     if ((F^.Table[T.P[K] shr 6] shr (T.P[K] and 63)) and 1) <> 0 then
       Exit(K);

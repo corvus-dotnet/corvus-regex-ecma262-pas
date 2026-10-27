@@ -76,6 +76,8 @@ const
   PairMostTests = 4;
   { The most bytes of the literals looked at before they are compared one by one. }
   PairChecked = 16;
+  // The least share of text (UnitShare) of the rare byte of one literal searched for with a second byte (Eq2Block).
+  PairShare = 25;
 
 var
   UnitShares: array[0..127] of Int32;
@@ -95,6 +97,9 @@ type
   public
     Literal: TBytes;
     K: NativeInt;
+    { The literal's next rarest byte of another value, tested with the byte at K where the processor has AVX2 and
+      the byte at K is common (PairShare), or -1. }
+    K2: NativeInt;
     function Find(P: PByte; From, End_: NativeInt; out S, E: NativeInt): Boolean; override;
   end;
 
@@ -125,7 +130,10 @@ type
     Shortest: NativeInt;
     { The two positions, and the masks and values of each one's tests, broadcast. }
     I, J: NativeInt;
-    MI, VI, MJ, VJ: array of UInt64;
+    MI, VI, MJ, VJ: array[0..3] of UInt64;
+    NI, NJ: Int32;
+    { The tests as PairBlockN reads them (VecConsts): the masks and values of I, then of J. }
+    Consts: TBytes;
     { For each of the first bytes of the literals up to PairChecked, the values they hold there. }
     Sets: array of TByteSet;
     { The literals are every sequence of the values Sets holds, all of one length (a word's cases written out): a
@@ -135,6 +143,13 @@ type
     function Find(P: PByte; From, End_: NativeInt; out S, E: NativeInt): Boolean; override;
   end;
 
+  { A TLit is a literal's bytes and their number. }
+  TLit = record
+    P: PByte;
+    Len: NativeInt;
+  end;
+  PLit = ^TLit;
+
   { A TTableFinder is any set of literals: a table of the bytes the literals hold at their rarest position, read a
     byte at a time, and the literals that start with the byte found compared in order. The search the crate makes
     with Teddy and with aho-corasick's automaton, where no two positions take few enough tests for TPairFinder. }
@@ -143,8 +158,18 @@ type
     K: NativeInt;
     At: TByteSet;
     Shortest: NativeInt;
-    { The literals by their first byte, in the pattern's order. }
-    ByFirst: array[0..255] of TByteLists;
+    { The literals, which Lits points into. }
+    Literals: TByteLists;
+    { The literals by their first byte, in the pattern's order: those of byte b are Lits[FirstAt[b]] up to (not
+      including) Lits[FirstAt[b + 1]]. }
+    Lits: array of TLit;
+    FirstAt: array[0..256] of Int32;
+    { For each of the first NSets bytes of the literals (up to PairChecked), the values they hold there. }
+    Sets: array[0..PairChecked - 1] of TByteSet;
+    NSets: NativeInt;
+    { The nibble tables of the literals' first three bytes as TeddyBlock reads them, or empty without SSSE3. }
+    Tab: TBytes;
+    function LiteralAt(P: PByte; Q, End_: NativeInt): NativeInt; inline;
     function Find(P: PByte; From, End_: NativeInt; out S, E: NativeInt): Boolean; override;
   end;
 
@@ -215,6 +240,23 @@ begin
       Result := K;
 end;
 
+{ CapitalEnd reports whether the byte of a UTF-8 literal at K ends a character of two bytes that is a capital of the
+  alphabets Share16 counts (Latin, Greek, Cyrillic, Armenian), so that it is as rare as an ASCII capital in text: the
+  last byte of a Han character, which thousands of characters share, is not, nor is a mark such as the middle dot of
+  a Chinese name. }
+function CapitalEnd(const L: TBytes; K: NativeInt): Boolean;
+var
+  U: UInt16;
+begin
+  Result := False;
+  if (K = 0) or (L[K] < $80) or (L[K] > $BF) or (L[K - 1] < $C2) or (L[K - 1] > $DF) then
+    Exit;
+  if (K >= 2) and (L[K - 2] >= $C0) then
+    Exit;
+  U := ((L[K - 1] and $1F) shl 6) or (L[K] and $3F);
+  Result := ((U < $250) or ((U >= $370) and (U < $590))) and UcdCategory('Lu')^.Contains(U);
+end;
+
 function ShortestOf(const Literals: TByteLists): NativeInt;
 var
   K: NativeInt;
@@ -274,10 +316,38 @@ end;
 function TRareFinder.Find(P: PByte; From, End_: NativeInt; out S, E: NativeInt): Boolean;
 var
   B: Byte;
-  At, Q, Start: NativeInt;
+  At, Q, Start, Last64, Far: NativeInt;
+  Lanes: UInt64;
 begin
   B := Literal[K];
   At := From + K;
+  if K2 >= 0 then begin
+    // Sixty-four starts a block with the two bytes tested together (Eq2Block): its lanes are candidates, each
+    // compared with the literal.
+    Far := K;
+    if K2 > Far then
+      Far := K2;
+    Start := From;
+    Last64 := End_ - 64 - Far;
+    while Start <= Last64 do begin
+      Q := Eq2Block(P, Start, Last64, K, K2, B, Literal[K2], Lanes);
+      if Q < 0 then begin
+        Inc(Start, ((Last64 - Start) div 64 + 1) * 64);
+        Break;
+      end;
+      while Lanes <> 0 do begin
+        At := Q + NativeInt(BsfQWord(Lanes));
+        if StartsWith(P, At, End_, @Literal[0], Length(Literal)) then begin
+          S := At;
+          E := At + Length(Literal);
+          Exit(True);
+        end;
+        Lanes := Lanes and (Lanes - 1);
+      end;
+      Start := Q + 64;
+    end;
+    At := Start + K;
+  end;
   while At < End_ do begin
     Q := IndexByte1(P, At, End_, B);
     if Q < 0 then
@@ -371,7 +441,7 @@ end;
 function TFirstsFinder.Find(P: PByte; From, End_: NativeInt; out S, E: NativeInt): Boolean;
 var
   At, Q, Start, L: NativeInt;
-  Lits: TByteLists;
+  Lits: ^TByteLists;
 begin
   At := From + K;
   while At < End_ do begin
@@ -386,11 +456,11 @@ begin
       Break;
     Start := Q - K;
     // A byte of the range no literal holds there has no literals.
-    Lits := ByValue[P[Q]];
-    for L := 0 to High(Lits) do
-      if StartsWith(P, Start, End_, @Lits[L][0], Length(Lits[L])) then begin
+    Lits := @ByValue[P[Q]];
+    for L := 0 to High(Lits^) do
+      if StartsWith(P, Start, End_, @Lits^[L][0], Length(Lits^[L])) then begin
         S := Start;
-        E := Start + Length(Lits[L]);
+        E := Start + Length(Lits^[L]);
         Exit(True);
       end;
     At := Q + 1;
@@ -453,6 +523,7 @@ end;
   two of their positions take PairMostTests tests or fewer each. }
 function BuildPairFinder(const Literals: TByteLists; const Ranks: TRanks): TPairFinder;
 var
+  Pairs: TBytes;
   Shortest, X, Y, BI, BJ, Checked, K, L: NativeInt;
   Values: array of TBytes;
   Tests: array of TBytes;
@@ -464,10 +535,11 @@ var
   F: TPairFinder;
   V: Int32;
 
-  procedure Broadcast(const T: TBytes; var M, Vs: array of UInt64);
+  procedure Broadcast(const T: TBytes; var M, Vs: array of UInt64; out Count: Int32);
   var
     Q: NativeInt;
   begin
+    Count := Length(T) div 2;
     for Q := 0 to Length(T) div 2 - 1 do begin
       M[Q] := Broadcast8(T[2 * Q]);
       Vs[Q] := Broadcast8(T[2 * Q + 1]);
@@ -543,14 +615,14 @@ begin
     Inc(K);
   end;
   F.Every := F.Every and (Product = Length(Literals));
-  V := Length(Tests[BI]) div 2;
-  SetLength(F.MI, V);
-  SetLength(F.VI, V);
-  Broadcast(Tests[BI], F.MI, F.VI);
-  V := Length(Tests[BJ]) div 2;
-  SetLength(F.MJ, V);
-  SetLength(F.VJ, V);
-  Broadcast(Tests[BJ], F.MJ, F.VJ);
+  Broadcast(Tests[BI], F.MI, F.VI, F.NI);
+  Broadcast(Tests[BJ], F.MJ, F.VJ, F.NJ);
+  SetLength(Pairs, Length(Tests[BI]) + Length(Tests[BJ]));
+  for K := 0 to High(Tests[BI]) do
+    Pairs[K] := Tests[BI][K];
+  for K := 0 to High(Tests[BJ]) do
+    Pairs[Length(Tests[BI]) + K] := Tests[BJ][K];
+  VecConsts(Pairs, F.Consts);
   Result := F;
 end;
 
@@ -573,21 +645,11 @@ begin
   Result := -1;
 end;
 
-{ Pass is the lanes of a word that pass the tests, by the cheap test of HasZero, which may flag a lane that does not
-  pass but never misses one: every candidate is compared with the literals. }
-function Pass(X: UInt64; const M, V: array of UInt64): UInt64; inline;
-var
-  K: NativeInt;
-begin
-  Result := HasZero((X or M[0]) xor V[0]);
-  for K := 1 to High(M) do
-    Result := Result or HasZero((X or M[K]) xor V[K]);
-end;
-
 function TPairFinder.Find(P: PByte; From, End_: NativeInt; out S, E: NativeInt): Boolean;
 var
-  Last, At, Blocks, Q, EndAt, Far: NativeInt;
+  Last, At, Blocks, Q, EndAt, Far, Last16: NativeInt;
   M, MIW, VIW, MJW, VJW: UInt64;
+  Lanes: UInt32;
 begin
   S := -1;
   E := -1;
@@ -600,44 +662,57 @@ begin
   if J > Far then
     Far := J;
   Blocks := End_ - 8 - Far;
-  if (Length(MI) = 1) and (Length(MJ) = 1) then begin
+  if (NI = 1) and (NJ = 1) then begin
+    // Sixteen starts a block (PairBlock): its lanes are candidates, each compared with the literals.
     MIW := MI[0];
     VIW := VI[0];
     MJW := MJ[0];
     VJW := VJ[0];
-    while At <= Blocks do begin
-      M := HasZero((Word8(P, At + I) or MIW) xor VIW) and HasZero((Word8(P, At + J) or MJW) xor VJW);
-      while M <> 0 do begin
-        Q := At + Lane(M);
-        if Q <= Last then begin
-          EndAt := LiteralAt(P, Q, End_);
+    Last16 := End_ - 16 - Far;
+    while At <= Last16 do begin
+      Q := PairBlock(P, At, Last16, I, J, MIW, VIW, MJW, VJW, Lanes);
+      if Q < 0 then begin
+        Inc(At, ((Last16 - At) div 16 + 1) * 16);
+        Break;
+      end;
+      while Lanes <> 0 do begin
+        S := Q + NativeInt(BsfDWord(Lanes));
+        if S <= Last then begin
+          EndAt := LiteralAt(P, S, End_);
           if EndAt >= 0 then begin
-            S := Q;
             E := EndAt;
             Exit(True);
           end;
         end;
-        M := M and (M - 1);
+        Lanes := Lanes and (Lanes - 1);
       end;
-      Inc(At, 8);
+      At := Q + 16;
     end;
-  end else
-    while At <= Blocks do begin
-      M := Pass(Word8(P, At + I), MI, VI) and Pass(Word8(P, At + J), MJ, VJ);
-      while M <> 0 do begin
-        Q := At + Lane(M);
-        if Q <= Last then begin
-          EndAt := LiteralAt(P, Q, End_);
+    S := -1;
+  end else begin
+    // Sixteen starts a block with several tests a position (PairBlockN).
+    Last16 := End_ - 16 - Far;
+    while At <= Last16 do begin
+      Q := PairBlockN(P, At, Last16, I, J, @Consts[0], NI, NJ, Lanes);
+      if Q < 0 then begin
+        Inc(At, ((Last16 - At) div 16 + 1) * 16);
+        Break;
+      end;
+      while Lanes <> 0 do begin
+        S := Q + NativeInt(BsfDWord(Lanes));
+        if S <= Last then begin
+          EndAt := LiteralAt(P, S, End_);
           if EndAt >= 0 then begin
-            S := Q;
             E := EndAt;
             Exit(True);
           end;
         end;
-        M := M and (M - 1);
+        Lanes := Lanes and (Lanes - 1);
       end;
-      Inc(At, 8);
+      At := Q + 16;
     end;
+    S := -1;
+  end;
   while At <= Last do begin
     EndAt := LiteralAt(P, At, End_);
     if EndAt >= 0 then begin
@@ -652,9 +727,54 @@ end;
 
 { TTableFinder }
 
+(* TeddyTables is the tables of TeddyBlock for literals of Shortest bytes or more. Each literal is in one of eight
+  buckets by its first bytes (up to three, and up to Shortest) with the ASCII letters folded, so that the cases of a
+  word share a bucket and add no starts to the others; the buckets of the distinct prefixes are taken in turn. A
+  position at or past Shortest passes every byte. *)
+function TeddyTables(const Literals: TByteLists; Shortest: NativeInt): TBytes;
+var
+  Keys: array of UInt32;
+  NKeys, L, M, Width, Bucket: NativeInt;
+  Key: UInt32;
+  B: Byte;
+begin
+  SetLength(Result, 112);
+  FillChar(Result[0], 96, 0);
+  FillChar(Result[96], 16, $0F);
+  Width := Shortest;
+  if Width > 3 then
+    Width := 3;
+  for M := Width to 2 do
+    FillChar(Result[32 * M], 32, $FF);
+  SetLength(Keys, Length(Literals));
+  NKeys := 0;
+  for L := 0 to High(Literals) do begin
+    Key := 0;
+    for M := 0 to Width - 1 do begin
+      B := Literals[L][M];
+      if (B or $20) in [Ord('a')..Ord('z')] then
+        B := B or $20;
+      Key := Key or (UInt32(B) shl (8 * M));
+    end;
+    Bucket := 0;
+    while (Bucket < NKeys) and (Keys[Bucket] <> Key) do
+      Inc(Bucket);
+    if Bucket = NKeys then begin
+      Keys[NKeys] := Key;
+      Inc(NKeys);
+    end;
+    Bucket := Bucket and 7;
+    for M := 0 to Width - 1 do begin
+      B := Literals[L][M];
+      Result[32 * M + (B and 15)] := Result[32 * M + (B and 15)] or (1 shl Bucket);
+      Result[32 * M + 16 + (B shr 4)] := Result[32 * M + 16 + (B shr 4)] or (1 shl Bucket);
+    end;
+  end;
+end;
+
 function BuildTableFinder(const Literals: TByteLists; const Rank: TRanks): TTableFinder;
 var
-  Shortest, BestK, K, L: NativeInt;
+  Shortest, BestK, K, L, N, B: NativeInt;
   BestCost, Cost: Int64;
   V: TBytes;
   F: TTableFinder;
@@ -675,28 +795,98 @@ begin
   F := TTableFinder.Create;
   F.K := BestK;
   F.Shortest := Shortest;
+  F.Literals := Literals;
+  SetLength(F.Lits, Length(Literals));
+  N := 0;
+  for B := 0 to 255 do begin
+    F.FirstAt[B] := N;
+    for L := 0 to High(Literals) do
+      if Literals[L][0] = B then begin
+        F.Lits[N].P := @Literals[L][0];
+        F.Lits[N].Len := Length(Literals[L]);
+        Inc(N);
+      end;
+  end;
+  F.FirstAt[256] := N;
+  F.NSets := Shortest;
+  if F.NSets > PairChecked then
+    F.NSets := PairChecked;
   for L := 0 to High(Literals) do begin
     AddToSet(F.At, Literals[L][BestK]);
-    AddList(F.ByFirst[Literals[L][0]], Literals[L]);
+    for K := 0 to F.NSets - 1 do
+      AddToSet(F.Sets[K], Literals[L][K]);
   end;
+  if HasSsse3 then
+    F.Tab := TeddyTables(Literals, Shortest);
   Result := F;
+end;
+
+{ LiteralAt is the end of the first literal at Q, where Q is at most the end of the text less the shortest literal,
+  or -1: the bytes of the literals' first positions tested first, then the literals of its first byte compared. }
+function TTableFinder.LiteralAt(P: PByte; Q, End_: NativeInt): NativeInt;
+var
+  K, L, Last: NativeInt;
+  Lit: PLit;
+begin
+  for K := 0 to NSets - 1 do
+    if not InSet(Sets[K], P[Q + K]) then
+      Exit(-1);
+  // A pointer to the literals of the byte, so that reading them copies and range checks nothing.
+  Lit := PLit(Pointer(Lits));
+  Last := FirstAt[P[Q] + 1];
+  L := FirstAt[P[Q]];
+  Inc(Lit, L);
+  while L < Last do begin
+    if StartsWith(P, Q, End_, Lit^.P, Lit^.Len) then
+      Exit(Q + Lit^.Len);
+    Inc(Lit);
+    Inc(L);
+  end;
+  Result := -1;
 end;
 
 function TTableFinder.Find(P: PByte; From, End_: NativeInt; out S, E: NativeInt): Boolean;
 var
-  Last, Q, L: NativeInt;
-  Lits: TByteLists;
+  Last, Last16, Q, B, EndAt: NativeInt;
+  Lanes: UInt32;
 begin
   Last := End_ - Shortest;
-  for Q := From to Last do
-    if InSet(At, P[Q + K]) then begin
-      Lits := ByFirst[P[Q]];
-      for L := 0 to High(Lits) do
-        if StartsWith(P, Q, End_, @Lits[L][0], Length(Lits[L])) then begin
-          S := Q;
-          E := Q + Length(Lits[L]);
-          Exit(True);
+  if Tab <> nil then begin
+    // Sixteen starts a block (TeddyBlock), which reads up to its last start + 17: its lanes are candidates, each
+    // compared with the literals.
+    Last16 := End_ - 18;
+    if Last16 > Last then
+      Last16 := Last;
+    while From <= Last16 do begin
+      B := TeddyBlock(P, From, Last16, @Tab[0], Lanes);
+      if B < 0 then begin
+        Inc(From, ((Last16 - From) div 16 + 1) * 16);
+        Break;
+      end;
+      while Lanes <> 0 do begin
+        Q := B + NativeInt(BsfDWord(Lanes));
+        if Q <= Last then begin
+          EndAt := LiteralAt(P, Q, End_);
+          if EndAt >= 0 then begin
+            S := Q;
+            E := EndAt;
+            Exit(True);
+          end;
         end;
+        Lanes := Lanes and (Lanes - 1);
+      end;
+      From := B + 16;
+    end;
+  end;
+  // Q + K is below End_ for every Q up to Last.
+  for Q := From to Last do
+    if ((At[P[Q + K] shr 6] shr (P[Q + K] and 63)) and 1) <> 0 then begin
+      EndAt := LiteralAt(P, Q, End_);
+      if EndAt >= 0 then begin
+        S := Q;
+        E := EndAt;
+        Exit(True);
+      end;
     end;
   S := -1;
   E := -1;
@@ -705,7 +895,8 @@ end;
 
 function BuildByteFinder(const Literals: TByteLists; const Rank: TRanks): TByteFinder;
 var
-  Best: NativeInt;
+  Pair: TPairFinder;
+  Best, K: NativeInt;
   One: TOneFinder;
   Rare: TRareFinder;
 begin
@@ -724,7 +915,45 @@ begin
       Rare := TRareFinder.Create;
       Rare.Literal := Literals[0];
       Rare.K := Best;
+      Rare.K2 := -1;
+      // A byte as common as a capital T leaves many starts that are not the literal, which a second byte turns away
+      // in the same pass; a rarer one is searched for alone, which reads half as much. A literal of three bytes or
+      // fewer is a word as common as its capital (nearly every T of English text begins The), so a second byte
+      // turns few starts away, as the Julia engine rules (vector_alone).
+      if HasAvx2 and (UnitShare(Literals[0][Best]) >= PairShare) and (Length(Literals[0]) > 3) then
+        for K := 0 to High(Literals[0]) do
+          if (Literals[0][K] <> Literals[0][Best]) and
+            ((Rare.K2 < 0) or (Rank[Literals[0][K]] < Rank[Literals[0][Rare.K2]])) then
+            Rare.K2 := K;
       Exit(Rare);
+    end;
+    // With no ASCII byte rare enough alone, where the processor has AVX2: the last byte of a capital of another
+    // alphabet (Share16), which only that capital ends, searched for alone (the Ш of Шерлок); otherwise the two
+    // rarest bytes (by Rank) tested together, as memchr's memmem does.
+    if HasAvx2 then begin
+      Rare := TRareFinder.Create;
+      Rare.Literal := Literals[0];
+      Rare.K2 := -1;
+      Best := -1;
+      for K := 0 to High(Literals[0]) do
+        if CapitalEnd(Literals[0], K) and ((Best < 0) or (Rank[Literals[0][K]] < Rank[Literals[0][Best]])) then
+          Best := K;
+      if Best >= 0 then begin
+        Rare.K := Best;
+        Exit(Rare);
+      end;
+      Best := 0;
+      for K := 1 to High(Literals[0]) do
+        if Rank[Literals[0][K]] < Rank[Literals[0][Best]] then
+          Best := K;
+      Rare.K := Best;
+      for K := 0 to High(Literals[0]) do
+        if (Literals[0][K] <> Literals[0][Best]) and
+          ((Rare.K2 < 0) or (Rank[Literals[0][K]] < Rank[Literals[0][Rare.K2]])) then
+          Rare.K2 := K;
+      if Rare.K2 >= 0 then
+        Exit(Rare);
+      Rare.Free;
     end;
     Result := BuildPairFinder(Literals, Rank);
     if Result = nil then
@@ -732,10 +961,17 @@ begin
     Exit;
   end;
   Result := BuildFirstsFinder(Literals, Rank);
-  if Result = nil then
-    Result := BuildPairFinder(Literals, Rank);
-  if Result = nil then
-    Result := BuildTableFinder(Literals, Rank);
+  if Result <> nil then
+    Exit;
+  // Several literals with no rare first bytes go to Teddy where the processor has it, as the crate takes them to
+  // aho-corasick's Teddy: three positions in one pass turn away more starts than the pair search's two. The cases of
+  // one word stay with the pair search, whose candidates need no comparing (TPairFinder.Every) or whose positions take
+  // one test each (PairBlock).
+  Pair := BuildPairFinder(Literals, Rank);
+  if (Pair <> nil) and (Pair.Every or ((Pair.NI = 1) and (Pair.NJ = 1)) or not HasSsse3) then
+    Exit(Pair);
+  Pair.Free;
+  Result := BuildTableFinder(Literals, Rank);
 end;
 
 function PackedRanks(const Literals: TWordLists): TRanks;
