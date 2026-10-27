@@ -86,8 +86,212 @@ begin
   Result := OneOf(I, R, W);
 end;
 
-{ Run reports whether the program matches at the position Start. It keeps its choices on an explicit stack, so the
-  depth of the search is bounded by memory and not by the stack of the thread. When it fails, every group and
+{ The readers of the automata of the Adfa unit. Each loop reads units at positions below the length of the text. }
+
+{ StartState is the start state at Start: where the pattern has no boundary or anchor that looks back, the one. }
+function StartState(A: TAnchoredDfa; const T: TText; Start: NativeInt): Int32; inline;
+var
+  K: Int32;
+  C: UInt32;
+begin
+  if not A.Context then
+    Exit(A.Starts[0]);
+  K := 0;
+  if Start > 0 then begin
+    C := U(T, Start - 1);
+    if (C < $80) and IsWordByte(C) then
+      K := 2;
+  end else
+    K := 1;
+  Result := A.Starts[K];
+end;
+
+{ RunDfa reads the automaton from the row At: the end of the last match found, or AdfaNone or AdfaBail. }
+function RunDfa(A: TAnchoredDfa; const T: TText; From: NativeInt; At: UInt32): NativeInt;
+var
+  Last, P, N: NativeInt;
+  C, Tr: UInt32;
+begin
+  Last := AdfaNone;
+  P := From;
+  N := T.Len;
+  if (P < 0) or (P > N) then
+    RaiseRange;
+  while P < N do begin
+    C := T.P[P];
+    if C >= $80 then
+      Exit(AdfaBail);
+    Tr := A.Fast[At + A.ClassOf[C]];
+    if (Tr and FastMatched) <> 0 then
+      Last := P;
+    At := Tr and not FastMatched;
+    if At = 0 then
+      Exit(Last);
+    Inc(P);
+  end;
+  if A.AtEnd[At shr A.Shift] then
+    Exit(P);
+  Result := Last;
+end;
+
+{ FindDfa is where the match that starts at Start ends, or AdfaNone where no match starts there, or AdfaBail where a
+  unit beyond ASCII was reached and the backtracking matcher decides. }
+function FindDfa(A: TAnchoredDfa; const T: TText; Start: NativeInt): NativeInt;
+var
+  S: Int32;
+begin
+  S := StartState(A, T, Start);
+  if S = AdfaDead then
+    Exit(AdfaNone);
+  // The state is kept premultiplied by the stride, so a step is one load and an add.
+  Result := RunDfa(A, T, Start, UInt32(S) shl A.Shift);
+end;
+
+{ FindAfterDfa is FindDfa from Start where the units from Start to From are a prefix whose states Rows holds (see
+  TAnchoredDfa.After). }
+function FindAfterDfa(A: TAnchoredDfa; const T: TText; Start, From: NativeInt; const Rows: TStartRows): NativeInt;
+var
+  K: Int32;
+  C, Row: UInt32;
+begin
+  K := 0;
+  if A.Context then begin
+    if Start > 0 then begin
+      C := U(T, Start - 1);
+      if (C < $80) and IsWordByte(C) then
+        K := 2;
+    end else
+      K := 1;
+  end;
+  Row := Rows[K];
+  if Row = 0 then
+    Exit(AdfaNone);
+  Result := RunDfa(A, T, From, Row);
+end;
+
+{ MatchesAt reports whether any match starts at Start, found at the first place one ends: 1 or 0, or AdfaBail when a
+  unit beyond ASCII is reached first. }
+function MatchesAt(A: TAnchoredDfa; const T: TText; Start: NativeInt): NativeInt;
+var
+  S: Int32;
+  P: NativeInt;
+  At, C, Tr: UInt32;
+begin
+  S := StartState(A, T, Start);
+  if S = AdfaDead then
+    Exit(0);
+  At := UInt32(S) shl A.Shift;
+  if (Start < 0) or (Start > T.Len) then
+    RaiseRange;
+  for P := Start to T.Len - 1 do begin
+    C := T.P[P];
+    if C >= $80 then
+      Exit(AdfaBail);
+    Tr := A.Fast[At + A.ClassOf[C]];
+    if (Tr and FastMatched) <> 0 then
+      Exit(1);
+    At := Tr;
+    if At = 0 then
+      Exit(0);
+  end;
+  if A.AtEnd[At shr A.Shift] then
+    Result := 1
+  else
+    Result := 0;
+end;
+
+{ ScanDfa reads the forward automaton from a start state at From, and reports the first place at or after From where
+  a match ends (ScanMatch), or where a start state is reached again first, so that no match starts before it
+  (ScanIdle), or the unit beyond ASCII reached first (ScanBail); ScanNone at the end of the text with no match. }
+function ScanDfa(A: TAnchoredDfa; const T: TText; From: NativeInt; out Place: NativeInt): Int32;
+var
+  P, N: NativeInt;
+  Row, C, Tr: UInt32;
+begin
+  Row := UInt32(StartState(A, T, From)) shl A.Shift;
+  P := From;
+  N := T.Len;
+  if (P < 0) or (P > N) then
+    RaiseRange;
+  while P < N do begin
+    C := T.P[P];
+    if C >= $80 then begin
+      Place := P;
+      Exit(ScanBail);
+    end;
+    Tr := A.Fast[Row + A.ClassOf[C]];
+    if (Tr and FastMatched) <> 0 then begin
+      Place := P;
+      Exit(ScanMatch);
+    end;
+    Row := Tr;
+    Inc(P);
+    if A.StartLike[Row shr A.Shift] then begin
+      Place := P;
+      Exit(ScanIdle);
+    end;
+  end;
+  Place := P;
+  if A.AtEnd[Row shr A.Shift] then
+    Result := ScanMatch
+  else
+    Result := ScanNone;
+end;
+
+{ StartsBefore finds the starts before Q, as a mask of their distances (bit d of Lo, Hi is the start Q - d), that the
+  terms allow, looking no further back than Most units nor before Floor; false when a unit beyond ASCII is reached. }
+function StartsBefore(R: TReverseDfa; const T: TText; Q, Most, Floor: NativeInt; out Lo, Hi: UInt64): Boolean;
+var
+  Reach, D: NativeInt;
+  At, C, Tr: UInt32;
+begin
+  if R.AcceptFirst then
+    Lo := 1
+  else
+    Lo := 0;
+  Hi := 0;
+  At := UInt32(1) shl R.Shift;
+  Reach := Q - Floor;
+  if Reach < 0 then
+    Reach := 0;
+  if Most < Reach then
+    Reach := Most;
+  for D := 1 to Reach do begin
+    C := U(T, Q - D);
+    if C >= $80 then begin
+      Lo := 0;
+      Hi := 0;
+      Exit(False);
+    end;
+    Tr := R.Fast[At + R.ClassOf[C]];
+    if Tr = 0 then
+      Break;
+    if (Tr and FastMatched) <> 0 then begin
+      if D < 64 then
+        Lo := Lo or (UInt64(1) shl D)
+      else
+        Hi := Hi or (UInt64(1) shl (D - 64));
+    end;
+    At := Tr and not FastMatched;
+  end;
+  Result := True;
+end;
+
+{ SkipAhead is the first place at or after At that the window does not rule out: one unit read rules out the starts
+  of a window none of whose positions it can be. }
+function SkipAhead(S: TSkipWin; const T: TText; At: NativeInt): NativeInt;
+var
+  N: NativeInt;
+begin
+  N := T.Len;
+  while (At + S.Hi < N) and not S.Hit(U(T, At + S.Hi)) do
+    Inc(At, S.Len);
+  Result := At;
+end;
+
+{ Run reports whether the program matches at the position Start: by the anchored automaton where the program has one
+  and the text it reads is ASCII, and otherwise by the matcher. The matcher keeps its choices on an explicit stack, so
+  the depth of the search is bounded by memory and not by the stack of the thread. When it fails, every group and
   counter is back to the value it had on entry. It counts its steps, and when a check says the match has reached a
   limit it returns false with the reason in St^.Stop. }
 function Run(Prog: TProgram; St: PState; const T: TText; Start: NativeInt): Boolean;
@@ -106,6 +310,16 @@ var
   E: TEntry;
   Lit: PUnit;
 begin
+  if Prog.AnchoredDfa <> nil then begin
+    // Where the program has the anchored automaton and the text it reads is ASCII, the automaton decides.
+    At := FindDfa(Prog.AnchoredDfa, T, Start);
+    if At >= 0 then begin
+      St^.EndPos := At;
+      Exit(True);
+    end;
+    if At = AdfaNone then
+      Exit(False);
+  end;
   St^.Sp := 0;
   Insts := Prog.Insts;
   Quick := Prog.Quick;
@@ -678,18 +892,597 @@ begin
   end;
 end;
 
-{ Scan tries every position from Start that the first set allows, until one matches. }
-function Scan(Prog: TProgram; St: PState; const T: TText; Start, N: NativeInt; out From: NativeInt): Boolean;
+{ WidthAt is the width of the character at a position before the end. }
+function WidthAt(Prog: TProgram; const T: TText; At: NativeInt): NativeInt; inline;
+begin
+  if U(T, At) < $80 then
+    Exit(1);
+  ReadAt(T, At, Prog.Units, Result);
+end;
+
+{ EndOfRun is the end of the run of members of the set from At. }
+function EndOfRun(Prog: TProgram; const CS: TCharSet; const T: TText; At: NativeInt): NativeInt;
 var
-  Len, At, W: NativeInt;
+  C: UInt32;
+  R: Int32;
+  W: NativeInt;
+begin
+  while At < T.Len do begin
+    C := U(T, At);
+    if C < $80 then begin
+      if not CS.HasAscii(C) then
+        Break;
+      Inc(At);
+    end else begin
+      R := ReadAt(T, At, Prog.Units, W);
+      if not CS.Contains(R) then
+        Break;
+      Inc(At, W);
+    end;
+  end;
+  Result := At;
+end;
+
+{ NextMember is the first member of the set at or after At, with its width in W, or -1. }
+function NextMember(Prog: TProgram; const CS: TCharSet; const T: TText; At: NativeInt; out W: NativeInt): NativeInt;
+var
+  C: UInt32;
+  R: Int32;
+begin
+  W := 0;
+  while True do begin
+    At := FirstFind(Prog, T, At);
+    if (At < 0) or (At >= T.Len) then
+      Exit(-1);
+    C := U(T, At);
+    if C < $80 then begin
+      if CS.HasAscii(C) then begin
+        W := 1;
+        Exit(At);
+      end;
+      Inc(At);
+    end else begin
+      R := ReadAt(T, At, Prog.Units, W);
+      if CS.Contains(R) then
+        Exit(At);
+      Inc(At, W);
+    end;
+  end;
+end;
+
+{ FormsMatch is the first match at or after Start of the shape of an alternation of literals with forms. }
+function FormsMatch(Prog: TProgram; const T: TText; Start: NativeInt; out From, To_: NativeInt): Boolean;
+var
+  S: TSearchPlan;
+  Next, Q, QE, EndAt, At, A, K, W: NativeInt;
+  Ok: Boolean;
+  C: UInt32;
+  R: Int32;
+  Alt: TRuneLists;
+
+  function InForms(const F: TRunes; X: Int32): Boolean;
+  var
+    J: NativeInt;
+  begin
+    for J := 0 to High(F) do
+      if F[J] = X then
+        Exit(True);
+    Result := False;
+  end;
+
+begin
+  S := Prog.Search;
+  Next := Start;
+  From := 0;
+  To_ := 0;
+  while True do begin
+    if not FindLiterals(S.Literals, T, Next, Q, QE) then
+      Exit(False);
+    // The automaton compares several alternatives at once where the text is ASCII; one is compared faster as it is.
+    if (Prog.AnchoredDfa <> nil) and (Length(S.Forms) > 1) then begin
+      EndAt := FindDfa(Prog.AnchoredDfa, T, Q);
+      if EndAt >= 0 then begin
+        From := Q;
+        To_ := EndAt;
+        Exit(True);
+      end;
+      if EndAt = AdfaNone then begin
+        Next := Q + WidthAt(Prog, T, Q);
+        Continue;
+      end;
+    end;
+    for A := 0 to High(S.Forms) do begin
+      Alt := S.Forms[A];
+      At := Q;
+      Ok := True;
+      for K := 0 to High(Alt) do begin
+        if At >= T.Len then begin
+          Ok := False;
+          Break;
+        end;
+        C := U(T, At);
+        R := C;
+        W := 1;
+        if C >= $80 then
+          R := ReadAt(T, At, Prog.Units, W);
+        if not InForms(Alt[K], R) then begin
+          Ok := False;
+          Break;
+        end;
+        Inc(At, W);
+      end;
+      if Ok then begin
+        From := Q;
+        To_ := At;
+        Exit(True);
+      end;
+    end;
+    Next := Q + WidthAt(Prog, T, Q);
+  end;
+end;
+
+{ LoopMatch is the first match at or after Start of the shape of one greedy loop of a class. }
+function LoopMatch(Prog: TProgram; const T: TText; Start: NativeInt; out From, To_: NativeInt): Boolean;
+var
+  S: TSearchPlan;
+  W: NativeInt;
+begin
+  S := Prog.Search;
+  From := Start;
+  To_ := 0;
+  if S.ShapeMin <> 0 then begin
+    From := NextMember(Prog, S.ShapeSet, T, Start, W);
+    if From < 0 then
+      Exit(False);
+  end;
+  To_ := RunEndOf(S, T, From);
+  if To_ < 0 then
+    To_ := EndOfRun(Prog, S.ShapeSet, T, From);
+  Result := True;
+end;
+
+{ ShapeSearch is the first match at or after Start of a pattern of a simple shape. }
+function ShapeSearch(Prog: TProgram; const T: TText; Start: NativeInt; out From, To_: NativeInt): Boolean;
+var
+  S: TSearchPlan;
+  W: NativeInt;
+begin
+  S := Prog.Search;
+  From := 0;
+  To_ := 0;
+  if (Start > T.Len) or (T.Len - Start < ProgNeed(Prog)) then
+    Exit(False);
+  case S.Shape of
+    shLiterals: Exit(FindLiterals(S.Literals, T, Start, From, To_));
+    shForms: Exit(FormsMatch(Prog, T, Start, From, To_));
+    shSet: begin
+      From := NextMember(Prog, S.ShapeSet, T, Start, W);
+      To_ := From + W;
+      Exit(From >= 0);
+    end;
+  end;
+  Result := LoopMatch(Prog, T, Start, From, To_);
+end;
+
+{ FirstAllows reports whether a start passes the first set. }
+function FirstAllows(Prog: TProgram; const T: TText; At: NativeInt): Boolean; inline;
+var
+  C: UInt32;
+  W: NativeInt;
+begin
+  if not Prog.HasFirst then
+    Exit(True);
+  if At >= T.Len then
+    Exit(False);
+  C := U(T, At);
+  if C < $80 then
+    Exit(Prog.First.HasAscii(C));
+  Result := Prog.First.Contains(ReadAt(T, At, Prog.Units, W));
+end;
+
+{ TryAt reports whether the program matches at the start, with the reason for stopping in St^.Stop. }
+function TryAt(Prog: TProgram; St: PState; const T: TText; At: NativeInt): Boolean; inline;
+begin
+  Result := FirstAllows(Prog, T, At) and Run(Prog, St, T, At);
+end;
+
+{ RulesOut reports whether nothing from the occurrence at Q on can match, by the check's automaton while it pays. }
+function RulesOut(R: TRestCheck; const T: TText; Q: NativeInt): Boolean;
+begin
+  if (R = nil) or not R.Pays then
+    Exit(False);
+  Result := MatchesAt(R.Dfa, T, Q) = 0;
+  R.Count(Result);
+end;
+
+{ WalkBack is the position N characters before At, not before Floor (the furthest it gets when there are fewer),
+  with the characters it went back over in K. }
+function WalkBack(Prog: TProgram; const T: TText; At, N, Floor: NativeInt; out K: NativeInt): NativeInt;
+var
+  W: NativeInt;
+begin
+  K := 0;
+  while (K < N) and (At > Floor) do begin
+    ReadLast(T, At, Prog.Units, W);
+    if At - W < Floor then
+      Break;
+    Dec(At, W);
+    Inc(K);
+  end;
+  Result := At;
+end;
+
+{ AsciiRun reports whether every unit from From to before To_ (or the end of the text) is ASCII. }
+function AsciiRun(const T: TText; From, To_: NativeInt): Boolean;
+var
+  K: NativeInt;
+begin
+  if To_ > T.Len then
+    To_ := T.Len;
+  for K := From to To_ - 1 do
+    if U(T, K) >= $80 then
+      Exit(False);
+  Result := True;
+end;
+
+(* SearchReverse is SearchWindows with the terms before the anchors read backwards from each occurrence, so that only
+  the starts they allow are tried; Decided is false when a unit beyond ASCII is reached, for the plain search to be
+  made. A start is tried only once no later occurrence could allow an earlier one (it is before the next occurrence's
+  window), so the starts are tried in order across occurrences and the first match is the leftmost. *)
+function SearchReverse(Prog: TProgram; St: PState; const T: TText; Start, Need: NativeInt; out From: NativeInt;
+  out Decided: Boolean): Boolean;
+var
+  S: TSearchPlan;
+  Lo, Hi, Len, Base, Tried, Q, QE, NewBase, Shift, D, At, B, After, K, Q2: NativeInt;
+  Pend0, Pend1, M0, M1: UInt64;
+  Taken: Boolean;
+begin
+  S := Prog.Search;
+  Lo := S.Lo;
+  Hi := S.Hi;
+  Len := T.Len;
+  From := 0;
+  Decided := True;
+  // The starts waiting to be tried, as two words of bits: bit k is the position Base + k.
+  Pend0 := 0;
+  Pend1 := 0;
+  Base := Start;
+  // Every start at or before this has been tried, or can no longer be allowed.
+  Tried := -1;
+  if not FindLiterals(S.Literals, T, Start, Q, QE) then
+    Exit(False);
+  while True do begin
+    // The starts this occurrence's terms allow join those waiting.
+    NewBase := Q - Hi;
+    if NewBase < Start then
+      NewBase := Start;
+    if NewBase > Base then begin
+      Shift := NewBase - Base;
+      if Shift >= 128 then begin
+        Pend0 := 0;
+        Pend1 := 0;
+      end else if Shift >= 64 then begin
+        Pend0 := Pend1 shr (Shift - 64);
+        Pend1 := 0;
+      end else begin
+        Pend0 := (Pend0 shr Shift) or (Pend1 shl (64 - Shift));
+        Pend1 := Pend1 shr Shift;
+      end;
+      Base := NewBase;
+    end;
+    // An occurrence from which nothing can match allows no start.
+    M0 := 0;
+    M1 := 0;
+    if not RulesOut(S.Rest, T, Q) then
+      if not StartsBefore(S.Reverse, T, Q, Hi, Start, M0, M1) then begin
+        Decided := False;
+        Exit(False);
+      end;
+    // No start nearer than Lo characters.
+    if Lo >= 64 then begin
+      M0 := 0;
+      M1 := M1 and (High(UInt64) shl (Lo - 64));
+    end else if Lo > 0 then
+      M0 := M0 and (High(UInt64) shl Lo);
+    while (M0 or M1) <> 0 do begin
+      if M1 <> 0 then begin
+        D := 64 + BsrQWord(M1);
+        M1 := M1 and not (UInt64(1) shl (D - 64));
+      end else begin
+        D := BsrQWord(M0);
+        M0 := M0 and not (UInt64(1) shl D);
+      end;
+      At := Q - D;
+      if (At >= Base) and (At > Tried) then begin
+        B := At - Base;
+        if B < 64 then
+          Pend0 := Pend0 or (UInt64(1) shl B)
+        else
+          Pend1 := Pend1 or (UInt64(1) shl (B - 64));
+      end;
+    end;
+    After := Q + WidthAt(Prog, T, Q);
+    // The earliest waiting start is tried once no occurrence before it plus the window could allow an earlier one:
+    // an occurrence within that reach is taken in first, which looks no further than the reach.
+    Taken := False;
+    while (Pend0 or Pend1) <> 0 do begin
+      if Pend0 <> 0 then
+        K := BsfQWord(Pend0)
+      else
+        K := 64 + BsfQWord(Pend1);
+      At := Base + K;
+      // The window is Hi characters, and the search counts units: the two agree over ASCII alone. Where the reach
+      // holds a unit beyond ASCII, an occurrence more than Hi units on can be within Hi characters and allow an
+      // earlier start than this one, so the plain search decides.
+      if not AsciiRun(T, At, At + Hi) then begin
+        Decided := False;
+        Exit(False);
+      end;
+      if After <= At + Hi then begin
+        Q2 := FindWithin(S.Literals, T, After, At + Hi);
+        if Q2 >= 0 then begin
+          Q := Q2;
+          Taken := True;
+          Break;
+        end;
+      end;
+      if K < 64 then
+        Pend0 := Pend0 and not (UInt64(1) shl K)
+      else
+        Pend1 := Pend1 and not (UInt64(1) shl (K - 64));
+      Tried := At;
+      if Len - At < Need then
+        Exit(False);
+      if TryAt(Prog, St, T, At) then begin
+        From := At;
+        Exit(True);
+      end;
+      if St^.Stop <> StopNone then
+        Exit(False);
+    end;
+    if not Taken then
+      if not FindLiterals(S.Literals, T, After, Q, QE) then
+        Exit(False);
+  end;
+end;
+
+{ SearchWindows is the search of a pattern each of whose matches holds one of the literals Lo to Hi characters after
+  its start: each occurrence opens the window of starts that could reach it, tried in order and never twice. }
+function SearchWindows(Prog: TProgram; St: PState; const T: TText; Start, Need: NativeInt;
+  out From: NativeInt): Boolean;
+var
+  S: TSearchPlan;
+  Len, Lo, Hi, Next, Untried, Q, QE, EndAt, Last, K, At: NativeInt;
+  Decided: Boolean;
+begin
+  S := Prog.Search;
+  From := 0;
+  if (S.Reverse <> nil) and (S.Hi < 127) then begin
+    Result := SearchReverse(Prog, St, T, Start, Need, From, Decided);
+    if Decided then
+      Exit;
+  end;
+  Len := T.Len;
+  Lo := S.Lo;
+  Hi := S.Hi;
+  Next := Start;
+  // Every start before this has been tried.
+  Untried := Start;
+  while True do begin
+    if not FindLiterals(S.Literals, T, Next, Q, QE) then
+      Exit(False);
+    Next := Q + WidthAt(Prog, T, Q);
+    if Hi = 0 then begin
+      // Every alternative starts with its literal: the match starts at the occurrence or not at all.
+      if Len - Q < Need then
+        Exit(False);
+      // The occurrence is the literal every match starts with: the automaton goes on after it.
+      EndAt := AfterFind(Prog, T, Q);
+      if EndAt >= 0 then begin
+        St^.EndPos := EndAt;
+        From := Q;
+        Exit(True);
+      end;
+      if EndAt = AdfaNone then
+        Continue;
+      if TryAt(Prog, St, T, Q) then begin
+        From := Q;
+        Exit(True);
+      end;
+      if St^.Stop <> StopNone then
+        Exit(False);
+      Continue;
+    end;
+    Last := WalkBack(Prog, T, Q, Lo, Start, K);
+    if (K < Lo) or (Last < Untried) or RulesOut(S.Rest, T, Q) then
+      Continue;
+    At := WalkBack(Prog, T, Q, Hi, Start, K);
+    while At <= Last do begin
+      if At >= Untried then begin
+        if Len - At < Need then
+          Exit(False);
+        if TryAt(Prog, St, T, At) then begin
+          From := At;
+          Exit(True);
+        end;
+        if St^.Stop <> StopNone then
+          Exit(False);
+      end;
+      if At = Len then
+        Break;
+      Inc(At, WidthAt(Prog, T, At));
+    end;
+    if At > Untried then
+      Untried := At;
+  end;
+end;
+
+(* SearchAfterLoops is the search of a pattern each of whose matches is runs of the loops' sets, then the literal:
+  the runs before each occurrence are walked back to the earliest start, which is tried. From that start the loops
+  reach every place a later start of the run could, so the later starts fail with it; the occurrence itself is not in
+  the run and may start a match, so it is tried next where every loop may be empty, and is the floor for the walk
+  back from later occurrences otherwise. A start before an occurrence can reach a later one through it (the literal
+  can be in a loop's set), so an occurrence ruled out does not move the floor. *)
+function SearchAfterLoops(Prog: TProgram; St: PState; const T: TText; Start, Need: NativeInt;
+  out From: NativeInt): Boolean;
+var
+  S: TSearchPlan;
+  Len, Next, Low, Q, QE, At, RunStart, W, K, E: NativeInt;
+  AllEmpty, Skip: Boolean;
+  C: UInt32;
+  R: Int32;
+begin
+  S := Prog.Search;
+  Len := T.Len;
+  From := 0;
+  Next := Start;
+  // The floor below which no start is tried again.
+  Low := Start;
+  AllEmpty := True;
+  for K := 0 to High(S.Mins) do
+    if S.Mins[K] <> 0 then
+      AllEmpty := False;
+  while True do begin
+    if not FindLiterals(S.Literals, T, Next, Q, QE) then
+      Exit(False);
+    Next := Q + WidthAt(Prog, T, Q);
+    // A loop that needs a member must have one just before the occurrence: a test of one character, made before the
+    // rest is checked.
+    if S.Mins[High(S.Mins)] = 1 then begin
+      if Q <= Low then
+        Continue;
+      C := U(T, Q - 1);
+      if C < $80 then
+        R := C
+      else
+        R := ReadLast(T, Q, Prog.Units, W);
+      if not S.Sets[High(S.Sets)].Contains(R) then
+        Continue;
+    end;
+    if RulesOut(S.Rest, T, Q) then
+      Continue;
+    At := Q;
+    Skip := False;
+    for K := High(S.Sets) downto 0 do begin
+      RunStart := At;
+      while At > Low do begin
+        C := U(T, At - 1);
+        R := C;
+        W := 1;
+        if C >= $80 then
+          R := ReadLast(T, At, Prog.Units, W);
+        if not S.Sets[K].Contains(R) or (At - W < Low) then
+          Break;
+        Dec(At, W);
+      end;
+      if (S.Mins[K] = 1) and (At = RunStart) then begin
+        Skip := True;
+        Break;
+      end;
+    end;
+    if Skip then
+      Continue;
+    if Len - At < Need then
+      Exit(False);
+    if TryAt(Prog, St, T, At) then begin
+      From := At;
+      Exit(True);
+    end;
+    if St^.Stop <> StopNone then
+      Exit(False);
+    if At < Q then begin
+      // The occurrence itself (\b[0-9a-f]*ét over "0aét", where the walk back gives 0).
+      Low := Q;
+      if AllEmpty then begin
+        if Len - Q < Need then
+          Exit(False);
+        if TryAt(Prog, St, T, Q) then begin
+          From := Q;
+          Exit(True);
+        end;
+        if St^.Stop <> StopNone then
+          Exit(False);
+        Low := Next;
+      end;
+    end else
+      Low := Next;
+    if Length(S.Sets) = 1 then begin
+      // Every occurrence in the rest of the loop's run walks back to the start just tried.
+      E := EndOfRun(Prog, S.Sets[0], T, Q);
+      if E > Next then
+        Next := E;
+    end;
+  end;
+end;
+
+{ TryStarts tries the starts from At to Last in order, as the plain search would: true with the start that matched in
+  At, Over when the search is over without one, or else false with At where the starts ran out. }
+function TryStarts(Prog: TProgram; St: PState; const T: TText; var At: NativeInt; Last: NativeInt;
+  out Over: Boolean): Boolean;
+var
+  Len, W: NativeInt;
   C: UInt32;
   R: Int32;
 begin
   Len := T.Len;
+  Over := False;
+  while (At <= Last) and (At <= Len) do begin
+    if not Prog.Units and MidPair(T, At) then begin
+      Inc(At);
+      Continue;
+    end;
+    if At = Len then begin
+      if not Prog.HasFirst and Run(Prog, St, T, At) then
+        Exit(True);
+      Over := True;
+      Exit(False);
+    end;
+    C := U(T, At);
+    R := C;
+    W := 1;
+    if C >= $80 then
+      R := ReadAt(T, At, Prog.Units, W);
+    if (not Prog.HasFirst or Prog.First.Contains(R)) and Run(Prog, St, T, At) then
+      Exit(True);
+    if St^.Stop <> StopNone then begin
+      Over := True;
+      Exit(False);
+    end;
+    Inc(At, W);
+  end;
+  Result := False;
+end;
+
+{ Scan tries every start from Start that the first set allows. }
+function Scan(Prog: TProgram; St: PState; const T: TText; Start, Need: NativeInt; out From: NativeInt): Boolean;
+var
+  S: TSearchPlan;
+  Fwd: TAnchoredDfa;
+  Len, At, W, Place, E: NativeInt;
+  Kind: Int32;
+  C: UInt32;
+  R: Int32;
+  Over: Boolean;
+begin
+  Len := T.Len;
+  S := Prog.Search;
+  Fwd := Prog.Forward;
   From := 0;
   At := Start;
   while True do begin
-    if Len - At < N then
+    if Prog.Skip <> nil then
+      At := SkipAhead(Prog.Skip, T, At);
+    // Every match starts with a member of the first set, which starts with one of the first bytes or units.
+    At := FirstStart(Prog, T, At);
+    if At < 0 then
+      Exit(False);
+    // With the u or v flag the trail half of a pair is not a character a match can start at; the place after it
+    // goes back through the skip.
+    if not Prog.Units and (S.FirstUnits <> nil) and MidPair(T, At) then begin
+      Inc(At);
+      Continue;
+    end;
+    if Len - At < Need then
       Exit(False);
     if At = Len then begin
       From := At;
@@ -700,12 +1493,47 @@ begin
     W := 1;
     if C >= $80 then
       R := ReadAt(T, At, Prog.Units, W);
+    if S.LeadingWordBoundary and (At > 0) and IsWordUnit(U(T, At - 1)) then begin
+      // Inside a word, where \b cannot hold: the rest of the word is passed over.
+      E := EndOfRun(Prog, Prog.First, T, At);
+      if E < At + W then
+        E := At + W;
+      At := E;
+      Continue;
+    end;
+    if Fwd <> nil then begin
+      // One pass of the forward automaton from here says where a match first ends, or that none starts before a
+      // place where no thread is alive; only then are starts tried, from here to there.
+      Kind := ScanDfa(Fwd, T, At, Place);
+      if Kind = ScanNone then
+        Exit(False);
+      if Kind = ScanIdle then begin
+        At := Place;
+        Continue;
+      end;
+      if TryStarts(Prog, St, T, At, Place, Over) then begin
+        From := At;
+        Exit(True);
+      end;
+      if Over then
+        Exit(False);
+      Continue;
+    end;
     if (not Prog.HasFirst or Prog.First.Contains(R)) and Run(Prog, St, T, At) then begin
       From := At;
       Exit(True);
     end;
     if St^.Stop <> StopNone then
       Exit(False);
+    if S.HasSkipRun and S.SkipRun.Contains(R) then begin
+      // The start failed after its leading loop ate the run from here: every start in the rest of the run fails the
+      // same way.
+      E := EndOfRun(Prog, S.SkipRun, T, At + W);
+      if E < At + W then
+        E := At + W;
+      At := E;
+      Continue;
+    end;
     Inc(At, W);
   end;
 end;
@@ -726,6 +1554,10 @@ begin
     From := Start;
     Exit(Run(Prog, St, T, Start));
   end;
+  case Prog.Search.Plan of
+    pkWindows: Exit(SearchWindows(Prog, St, T, Start, N, From));
+    pkAfterLoops: Exit(SearchAfterLoops(Prog, St, T, Start, N, From));
+  end;
   Result := Scan(Prog, St, T, Start, N, From);
 end;
 
@@ -736,6 +1568,9 @@ var
   Stop: UInt8;
   K: NativeInt;
 begin
+  // A pattern of a simple shape with no group is answered by the search alone, with nothing of the matcher's.
+  if (Prog.Groups = 0) and not Sticky and not Prog.Anchored and (Prog.Search.Shape <> shNone) then
+    Exit(ShapeSearch(Prog, T, Start, From, To_));
   St := ThreadState;
   ResetState(St^, Prog, T.Len, Limit);
   Result := SearchProg(Prog, St, T, Start, Sticky, From);

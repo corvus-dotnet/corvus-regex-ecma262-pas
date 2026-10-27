@@ -31,7 +31,11 @@ type
 implementation
 
 uses
-  Corvus.Ecma262.RegularExpressions.Syntax;
+  Corvus.Ecma262.RegularExpressions.Syntax,
+  Corvus.Ecma262.RegularExpressions.Swar,
+  Corvus.Ecma262.RegularExpressions.Literals,
+  Corvus.Ecma262.RegularExpressions.Adfa,
+  Corvus.Ecma262.RegularExpressions.Search;
 
 {$I Corvus.Ecma262.RegularExpressions.MatcherBase.inc}
 
@@ -398,6 +402,98 @@ begin
   Result := True;
 end;
 
+{ The parts of the searches of the matcher that differ between the encodings beyond the unit. }
+
+{ FirstFind is the first position at or after At whose unit a member of the first set can start with, or -1; At
+  itself where the search has no first units. FirstStart is FirstFind for the scan. }
+function FirstFind(Prog: TProgram; const T: TText; At: NativeInt): NativeInt;
+var
+  F: ^TFirstBytes;
+  N, K: NativeInt;
+begin
+  if not Prog.Search.HasFirstBytes then
+    Exit(At);
+  F := @Prog.Search.FirstBytes;
+  N := T.Len;
+  case F^.Count of
+    1: Exit(IndexByte1(T.P, At, N, F^.A));
+    2: Exit(IndexByte2(T.P, At, N, F^.A, F^.B));
+    3: Exit(IndexByte4(T.P, At, N, F^.A, F^.B, F^.C, F^.C));
+  end;
+  for K := At to N - 1 do
+    if ((F^.Table[T.P[K] shr 6] shr (T.P[K] and 63)) and 1) <> 0 then
+      Exit(K);
+  Result := -1;
+end;
+
+function FirstStart(Prog: TProgram; const T: TText; At: NativeInt): NativeInt; inline;
+begin
+  Result := FirstFind(Prog, T, At);
+end;
+
+{ MidPair reports whether the position is between the halves of a surrogate pair, which UTF-8 has no position for. }
+function MidPair(const T: TText; At: NativeInt): Boolean; inline;
+begin
+  Result := False;
+end;
+
+{ RunEndOf is the end of the run of the loop's members that starts at At, or -1 to find it a member at a time. }
+function RunEndOf(S: TSearchPlan; const T: TText; At: NativeInt): NativeInt;
+var
+  N, F, J: NativeInt;
+begin
+  N := T.Len;
+  case S.RunEnd of
+    reAll: Exit(N);
+    reStops: begin
+      case S.NStops of
+        1: F := IndexByte1(T.P, At, N, S.Stops[0]);
+        2: F := IndexByte2(T.P, At, N, S.Stops[0], S.Stops[1]);
+      else
+        F := IndexByte4(T.P, At, N, S.Stops[0], S.Stops[1], S.Stops[2], S.Stops[2]);
+      end;
+      if F < 0 then
+        Exit(N);
+      Exit(F);
+    end;
+    reLine: begin
+      J := At;
+      while True do begin
+        J := IndexByte4(T.P, J, N, 10, 13, $E2, $E2);
+        if J < 0 then
+          Exit(N);
+        if (U(T, J) <> $E2) or ((J + 2 < N) and (U(T, J + 1) = $80) and ((U(T, J + 2) or 1) = $A9)) then
+          Exit(J);
+        Inc(J);
+      end;
+    end;
+  end;
+  Result := -1;
+end;
+
+{ AfterFind is where the match that starts at Q ends, for a pattern every match of which starts with the one literal
+  found at Q: the anchored automaton goes on after it. Or AdfaNone, or AdfaBail where the matcher decides. }
+function AfterFind(Prog: TProgram; const T: TText; Q: NativeInt): NativeInt; forward;
+
+{ FindLiterals is the leftmost occurrence of the search's literals at or after From, and FindWithin the one that
+  starts at or before Last. }
+function FindLiterals(L: TLiterals; const T: TText; From: NativeInt; out S, E: NativeInt): Boolean; inline;
+begin
+  Result := L.Find8(T.P, T.Len, From, S, E);
+end;
+
+function FindWithin(L: TLiterals; const T: TText; From, Last: NativeInt): NativeInt; inline;
+begin
+  Result := L.FindWithin8(T.P, T.Len, From, Last);
+end;
+
 {$I Corvus.Ecma262.RegularExpressions.Matcher.inc}
+
+function AfterFind(Prog: TProgram; const T: TText; Q: NativeInt): NativeInt;
+begin
+  if not Prog.HasAfter then
+    Exit(AdfaBail);
+  Result := FindAfterDfa(Prog.AnchoredDfa, T, Q, Q + Prog.AfterLength, Prog.AfterLiteral);
+end;
 
 end.

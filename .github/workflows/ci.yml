@@ -90,12 +90,22 @@ jobs:
       # Every unit with the compiler's warnings shown, the tests and the data runner.
       run: pwsh -NoProfile -File tools/build.ps1 -Options "-O3 $FPC_TARGET"
     - name: Test
-      run: bin/TestEngine
+      # The API, the searches against every position, and the allocations of a warm match.
+      run: |
+        bin/TestEngine
+        bin/TestSearch
+        bin/TestAllocations
     - name: Test with the memory of failed places from the first step
       if: runner.os == 'Linux'
-      run: bin/TestEngine
+      run: |
+        bin/TestEngine
+        bin/TestSearch
       env:
         CORVUS_REGEX_MEMO_FROM_THE_START: '1'
+    - name: Probe for stack overflows
+      # Deep, wide and long patterns in every grammar through every call, each on a thread with a stack of 4 MB and
+      # of 2 MB: none may overflow it (tools/stackprobe).
+      run: bin/stackprobe
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       # The Unicode tables and the properties of strings are written from the Rust crate's, at the version this engine
       # ports.
