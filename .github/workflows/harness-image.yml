@@ -1,0 +1,104 @@
+# The benchmark harness image: built and smoke-run on every pull request, every push to main and every release, and
+# published to ghcr.io/corvus-dotnet/corvus-regex-ecma262-pas (`:latest` from main, the release's tag from a release).
+# This repository publishes no benchmark results of its own: the central benchmark site
+# (https://corvus-oss.org/corvus-regex-ecma262-benchmarks/) runs this image each night on its runner, beside
+# the engines of every other source, and is the one page of figures.
+name: harness-image
+on:
+  push:
+    branches:
+    - main
+  pull_request:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: harness-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: Harness image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        persist-credentials: false
+    - name: Write the library's version into its public unit
+      # The harness reports the library's version, which is 0.0.0 on main. A library release (v<version>) tags a
+      # commit with its version written in already; a harness release (harness-<version>.<n>, for the library at
+      # <version>) tags a commit of main, so the version is written in here.
+      if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'harness-')
+      env:
+        TAG: ${{ github.event.release.tag_name }}
+      run: pwsh -NoProfile -File tools/release/stamp.ps1 -Tag "$TAG"
+    - name: Build the harness image
+      run: docker build --build-arg COMMIT="${GITHUB_SHA::7}" -t harness .
+    - name: "Smoke-run it: two workloads, the short job, as the central site runs it"
+      run: |
+        python3 -c "import json; w=json.load(open('tools/benchmarks/workloads.json')); json.dump([x for x in w if x['id'] in ('sherlock: aei','sherlock: zqj')], open('workloads.json','w'), ensure_ascii=False)"
+        mkdir -p texts out && chmod 777 out
+        curl -sSfL -o texts/sherlock.txt.gz https://raw.githubusercontent.com/dotnet/performance/main/src/benchmarks/micro/libraries/System.Text.RegularExpressions/TestData/sherlock.txt.gz
+        docker run --rm -e JOB=short -v "$PWD/workloads.json:/workloads.json:ro" -v "$PWD/texts:/texts:ro" -v "$PWD/out:/out" harness
+        python3 - <<'PY'
+        import json
+        d = json.load(open("out/industry.json"))
+        schemas = sorted(s["name"] for s in d["schemas"])
+        impls = sorted(i["name"] for i in d["impls"])
+        assert schemas == ["sherlock: aei", "sherlock: zqj"], schemas
+        engines = sorted(["V8", "corvus-regex-ecma262 UTF-16", "corvus-regex-ecma262 UTF-8", "TRegExpr", "TRegExpr Unicode"])
+        assert impls == engines, impls
+        for name in engines:
+            for w in schemas:
+                assert d["results"][name].get(w), (name, w)
+        for i in d["impls"]:
+            c = i["compliance"]
+            assert c == "not ECMA-262" or {"right", "wrong", "refused", "acceptedInvalid", "limited", "judge", "excludes"} <= set(c), (i["name"], c)
+        print("smoke run wrote", len(impls), "engines over", len(schemas), "workloads")
+        PY
+    - name: "Night run: the same two workloads with V8=0, each count checked against the workloads' v8Count"
+      # The central site runs this image with V8=0, so that V8 is timed once a night, and each engine's count is checked
+      # against the v8Count it writes into the workloads. The steps above never take that path. Here zqj carries its true
+      # count (0) and aei a wrong one (999), since no engine finds aei in the text and every engine counts 0 there. The
+      # data file must have no V8 row, every engine (this library's two and TRegExpr's two) must time zqj and give aei as a
+      # wrong count: a count other than V8's is a wrong answer, whatever the dialect.
+      run: |
+        python3 -c "import json; w=json.load(open('workloads.json')); [x.update(v8Count={'sherlock: zqj': 0, 'sherlock: aei': 999}[x['id']]) for x in w]; json.dump(w, open('workloads-night.json','w'), ensure_ascii=False)"
+        mkdir -p out-night && chmod 777 out-night
+        docker run --rm -e JOB=short -e V8=0 -v "$PWD/workloads-night.json:/workloads.json:ro" -v "$PWD/texts:/texts:ro" -v "$PWD/out-night:/out" harness
+        python3 - <<'PY'
+        import json
+        d = json.load(open("out-night/industry.json"))
+        names = [i["name"] for i in d["impls"]]
+        assert not any(i.get("group") == "V8" or i["name"] == "V8" for i in d["impls"]), names
+        ecma = [i["name"] for i in d["impls"] if isinstance(i.get("compliance"), dict)]
+        others = [i["name"] for i in d["impls"] if i.get("compliance") == "not ECMA-262"]
+        assert ecma and len(ecma) + len(others) == len(names), names
+        for name in ecma + others:
+            zqj, aei = d["results"][name].get("sherlock: zqj"), d["results"][name].get("sherlock: aei")
+            assert isinstance(zqj, dict) and "time" in zqj, (name, zqj)
+            assert aei == {"wrongCount": {"counted": 0, "v8": 999}}, (name, aei)
+        print("night run: no V8 row;", len(ecma) + len(others), "engines, of every dialect, held to v8Count")
+        PY
+    - name: "Count gate: every workload counted by this library beside V8, each count V8's"
+      # A count that differs from V8's is a wrong answer, which the central page shows as a wrong count: it fails here,
+      # on the pull request (tools/benchmarks/count-gate.py, run by run.sh with COUNT_GATE=1).
+      run: |
+        mkdir -p texts out && chmod 777 out
+        for f in sherlock 3200 mariomka opensubtitles-ru opensubtitles-zh; do
+          [ -f "texts/$f.txt.gz" ] || curl -sSfL -o "texts/$f.txt.gz" "https://raw.githubusercontent.com/dotnet/performance/main/src/benchmarks/micro/libraries/System.Text.RegularExpressions/TestData/$f.txt.gz"
+        done
+        docker run --rm -e COUNT_GATE=1 -v "$PWD/tools/benchmarks/workloads.json:/workloads.json:ro" -v "$PWD/texts:/texts:ro" -v "$PWD/out:/out" harness
+    - name: Publish the image
+      if: github.ref == 'refs/heads/main' || github.event_name == 'release'
+      run: |
+        echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+        image=ghcr.io/corvus-dotnet/corvus-regex-ecma262-pas
+        docker tag harness "$image:latest" && docker push "$image:latest"
+        if [ '${{ github.event_name }}' = 'release' ]; then docker tag harness "$image:${{ github.event.release.tag_name }}" && docker push "$image:${{ github.event.release.tag_name }}"; fi
