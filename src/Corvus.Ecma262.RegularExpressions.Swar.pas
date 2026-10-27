@@ -1,10 +1,11 @@
 unit Corvus.Ecma262.RegularExpressions.Swar;
 {$I ecma262.inc}
 
-{ The searches the Rust crate takes from memchr. One byte is the run-time library's IndexByte, which is assembler on
-  x86_64; two to four bytes, a range of bytes, and units of UTF-16 text are SWAR: eight bytes of a UInt64 read at a
-  time and tested together. A lane test is exact (no lane is flagged that does not pass), so the first flagged lane is
-  the first unit that passes.
+{ The searches the Rust crate takes from memchr, and the Teddy search it takes from aho-corasick. Over x86_64 each
+  reads sixteen bytes at a time with SSE2 (Teddy with SSSE3) and finishes with SWAR; over any other processor one byte
+  is the run-time library's IndexByte and the rest are SWAR: eight bytes of a UInt64 read at a time and tested
+  together. A lane test is exact (no lane is flagged that does not pass), so the first flagged lane is the first unit
+  that passes.
 
   Every function takes the text as a pointer and the end of what it may read, N, which the caller has checked lies
   within the text (the matcher checks it once against the length of the text). Each reads only below N: a word of
@@ -69,6 +70,19 @@ function PairBlockN(P: PByte; At, Last, I, J: NativeInt; Consts: PByte; NI, NJ: 
   32 * NR bytes (see VecConsts). }
 function IndexRanges(P: PByte; From, N: NativeInt; Consts: PByte; NR: Int32): NativeInt;
 
+{ TeddyBlock finds the first block of sixteen starts, from the start At by steps of sixteen up to (not past) Last, at
+  which some start S passes the nibble tables of Teddy (the searcher of the Rust crate aho-corasick, which the crate
+  takes for several literals): for each of the positions 0, 1 and 2, the table of the low nibble of P[S + m] and the
+  table of its high nibble give a byte of buckets each, and S passes where some bucket is in all six. Tab holds
+  sixteen bytes of each table, low then high, for positions 0 to 2, then sixteen bytes of $0F: 112 bytes. It returns
+  that block's first start and the lanes in Lanes (bit k for the start + k), or -1. The caller checks that every byte
+  read, up to Last + 17, lies within the text. It takes SSSE3 (HasSsse3); over any other processor it tests a start
+  at a time. }
+function TeddyBlock(P: PByte; At, Last: NativeInt; Tab: PByte; out Lanes: UInt32): NativeInt;
+
+{ HasSsse3 reports whether the processor has SSSE3, whose byte shuffle TeddyBlock reads its tables with. }
+function HasSsse3: Boolean;
+
 { VecConsts writes the pairs of bytes Pairs (a mask and a value, or a least byte and a width), each pair as sixteen
   copies of the one and then sixteen of the other, for PairBlockN and IndexRanges. }
 procedure VecConsts(const Pairs: array of Byte; var Consts: TBytes);
@@ -119,6 +133,52 @@ end;
   reads, so that nothing depends on the registers the calling convention of the system puts them in; the blocks use
   only registers both conventions let a routine overwrite (rax, rcx, rdx, r8 to r11, xmm0 to xmm5). A constant is a
   byte broadcast to a word (Broadcast8), which the block broadcasts to the sixteen lanes. *)
+
+{ VecEq1 passes a byte equal to A, two blocks of sixteen a step: Pairs is the number of steps of thirty-two bytes. }
+function VecEq1(Base: PByte; Pairs: NativeInt; A: UInt64): NativeInt;
+var
+  LBase: PByte;
+  LPairs, R: NativeInt;
+  LA: UInt64;
+begin
+  LBase := Base;
+  LPairs := Pairs;
+  LA := A;
+  R := -1;
+  if LPairs > 0 then
+    asm
+      mov rdx, LBase
+      mov rcx, LPairs
+      mov rax, LA
+      movq xmm1, rax
+      punpcklqdq xmm1, xmm1
+      xor r8, r8
+    @loop:
+      movdqu xmm0, [rdx + r8]
+      movdqu xmm3, [rdx + r8 + 16]
+      pcmpeqb xmm0, xmm1
+      pcmpeqb xmm3, xmm1
+      movdqa xmm2, xmm0
+      por xmm2, xmm3
+      pmovmskb eax, xmm2
+      test eax, eax
+      jnz @found
+      add r8, 32
+      dec rcx
+      jnz @loop
+      jmp @done
+    @found:
+      pmovmskb eax, xmm0
+      pmovmskb r9d, xmm3
+      shl r9, 16
+      or rax, r9
+      bsf rax, rax
+      add rax, r8
+      mov R, rax
+    @done:
+    end ['rax', 'rcx', 'rdx', 'r8', 'r9', 'xmm0', 'xmm1', 'xmm2', 'xmm3'];
+  Result := R;
+end;
 
 { VecEq2 passes a byte equal to A or B. }
 function VecEq2(Base: PByte; Blocks: NativeInt; A, B: UInt64): NativeInt;
@@ -544,12 +604,157 @@ end;
 
 {$ENDIF}
 
+{$IFDEF CPUX86_64}
+
+function DetectSsse3: Boolean;
+var
+  R: UInt32;
+begin
+  asm
+    mov eax, 1
+    cpuid
+    mov R, ecx
+  end ['rax', 'rbx', 'rcx', 'rdx'];
+  Result := (R and (UInt32(1) shl 9)) <> 0;
+end;
+
+function TeddyBlock(P: PByte; At, Last: NativeInt; Tab: PByte; out Lanes: UInt32): NativeInt;
+var
+  LP, LTab: PByte;
+  LBlocks, R: NativeInt;
+  LMask: UInt32;
+begin
+  Lanes := 0;
+  if At > Last then
+    Exit(-1);
+  LP := @P[At];
+  LTab := Tab;
+  LBlocks := (Last - At) div 16 + 1;
+  R := -1;
+  LMask := 0;
+  asm
+    mov rdx, LP
+    mov r10, LTab
+    mov rcx, LBlocks
+    movdqu xmm5, [r10 + 96]
+    xor r8, r8
+  @block:
+    movdqu xmm0, [rdx + r8]
+    movdqa xmm1, xmm0
+    psrlw xmm1, 4
+    pand xmm0, xmm5
+    pand xmm1, xmm5
+    movdqu xmm4, [r10]
+    pshufb xmm4, xmm0
+    movdqu xmm2, [r10 + 16]
+    pshufb xmm2, xmm1
+    pand xmm4, xmm2
+    movdqu xmm0, [rdx + r8 + 1]
+    movdqa xmm1, xmm0
+    psrlw xmm1, 4
+    pand xmm0, xmm5
+    pand xmm1, xmm5
+    movdqu xmm2, [r10 + 32]
+    pshufb xmm2, xmm0
+    pand xmm4, xmm2
+    movdqu xmm2, [r10 + 48]
+    pshufb xmm2, xmm1
+    pand xmm4, xmm2
+    movdqu xmm0, [rdx + r8 + 2]
+    movdqa xmm1, xmm0
+    psrlw xmm1, 4
+    pand xmm0, xmm5
+    pand xmm1, xmm5
+    movdqu xmm2, [r10 + 64]
+    pshufb xmm2, xmm0
+    pand xmm4, xmm2
+    movdqu xmm2, [r10 + 80]
+    pshufb xmm2, xmm1
+    pand xmm4, xmm2
+    pxor xmm3, xmm3
+    pcmpeqb xmm4, xmm3
+    pmovmskb eax, xmm4
+    xor eax, $FFFF
+    jnz @found
+    add r8, 16
+    dec rcx
+    jnz @block
+    jmp @done
+  @found:
+    mov LMask, eax
+    mov R, r8
+  @done:
+  end ['rax', 'rcx', 'rdx', 'r8', 'r10', 'xmm0', 'xmm1', 'xmm2', 'xmm3', 'xmm4', 'xmm5'];
+  if R < 0 then
+    Exit(-1);
+  Lanes := LMask;
+  Result := At + R;
+end;
+
+{$ELSE}
+
+function DetectSsse3: Boolean;
+begin
+  Result := False;
+end;
+
+function TeddyBlock(P: PByte; At, Last: NativeInt; Tab: PByte; out Lanes: UInt32): NativeInt;
+var
+  S, M: NativeInt;
+  B, X: Byte;
+begin
+  // A start at a time, over the first byte of each table.
+  while At <= Last do begin
+    Lanes := 0;
+    for S := 0 to 15 do begin
+      B := $FF;
+      for M := 0 to 2 do begin
+        X := P[At + S + M];
+        B := B and Tab[32 * M + (X and 15)] and Tab[32 * M + 16 + (X shr 4)];
+      end;
+      if B <> 0 then
+        Lanes := Lanes or (UInt32(1) shl S);
+    end;
+    if Lanes <> 0 then
+      Exit(At);
+    Inc(At, 16);
+  end;
+  Lanes := 0;
+  Result := -1;
+end;
+
+{$ENDIF}
+
+var
+  Ssse3: Boolean;
+
+function HasSsse3: Boolean;
+begin
+  Result := Ssse3;
+end;
+
 function IndexByte1(P: PByte; From, N: NativeInt; B: Byte): NativeInt;
 var
   K: SizeInt;
 begin
   if From >= N then
     Exit(-1);
+  {$IFDEF CPUX86_64}
+  // The run-time library's search over the first 256 bytes, which starts sooner for a byte close by (the ends of
+  // lines), then 32 bytes a step.
+  if N - From >= 288 then begin
+    K := IndexByte(P[From], 256, B);
+    if K >= 0 then
+      Exit(From + K);
+    Inc(From, 256);
+    K := VecEq1(@P[From], (N - From) div 32, Broadcast8(B));
+    if K >= 0 then
+      Exit(From + K);
+    Inc(From, ((N - From) div 32) * 32);
+    if From >= N then
+      Exit(-1);
+  end;
+  {$ENDIF}
   K := IndexByte(P[From], N - From, B);
   if K < 0 then
     Exit(-1);
@@ -814,5 +1019,8 @@ begin
       Exit(False);
   Result := True;
 end;
+
+initialization
+  Ssse3 := DetectSsse3;
 
 end.

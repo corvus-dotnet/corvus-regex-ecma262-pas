@@ -138,6 +138,13 @@ type
     function Find(P: PByte; From, End_: NativeInt; out S, E: NativeInt): Boolean; override;
   end;
 
+  { A TLit is a literal's bytes and their number. }
+  TLit = record
+    P: PByte;
+    Len: NativeInt;
+  end;
+  PLit = ^TLit;
+
   { A TTableFinder is any set of literals: a table of the bytes the literals hold at their rarest position, read a
     byte at a time, and the literals that start with the byte found compared in order. The search the crate makes
     with Teddy and with aho-corasick's automaton, where no two positions take few enough tests for TPairFinder. }
@@ -146,8 +153,18 @@ type
     K: NativeInt;
     At: TByteSet;
     Shortest: NativeInt;
-    { The literals by their first byte, in the pattern's order. }
-    ByFirst: array[0..255] of TByteLists;
+    { The literals, which Lits points into. }
+    Literals: TByteLists;
+    { The literals by their first byte, in the pattern's order: those of byte b are Lits[FirstAt[b]] up to (not
+      including) Lits[FirstAt[b + 1]]. }
+    Lits: array of TLit;
+    FirstAt: array[0..256] of Int32;
+    { For each of the first NSets bytes of the literals (up to PairChecked), the values they hold there. }
+    Sets: array[0..PairChecked - 1] of TByteSet;
+    NSets: NativeInt;
+    { The nibble tables of the literals' first three bytes as TeddyBlock reads them, or empty without SSSE3. }
+    Tab: TBytes;
+    function LiteralAt(P: PByte; Q, End_: NativeInt): NativeInt; inline;
     function Find(P: PByte; From, End_: NativeInt; out S, E: NativeInt): Boolean; override;
   end;
 
@@ -660,9 +677,54 @@ end;
 
 { TTableFinder }
 
+(* TeddyTables is the tables of TeddyBlock for literals of Shortest bytes or more. Each literal is in one of eight
+  buckets by its first bytes (up to three, and up to Shortest) with the ASCII letters folded, so that the cases of a
+  word share a bucket and add no starts to the others; the buckets of the distinct prefixes are taken in turn. A
+  position at or past Shortest passes every byte. *)
+function TeddyTables(const Literals: TByteLists; Shortest: NativeInt): TBytes;
+var
+  Keys: array of UInt32;
+  NKeys, L, M, Width, Bucket: NativeInt;
+  Key: UInt32;
+  B: Byte;
+begin
+  SetLength(Result, 112);
+  FillChar(Result[0], 96, 0);
+  FillChar(Result[96], 16, $0F);
+  Width := Shortest;
+  if Width > 3 then
+    Width := 3;
+  for M := Width to 2 do
+    FillChar(Result[32 * M], 32, $FF);
+  SetLength(Keys, Length(Literals));
+  NKeys := 0;
+  for L := 0 to High(Literals) do begin
+    Key := 0;
+    for M := 0 to Width - 1 do begin
+      B := Literals[L][M];
+      if (B or $20) in [Ord('a')..Ord('z')] then
+        B := B or $20;
+      Key := Key or (UInt32(B) shl (8 * M));
+    end;
+    Bucket := 0;
+    while (Bucket < NKeys) and (Keys[Bucket] <> Key) do
+      Inc(Bucket);
+    if Bucket = NKeys then begin
+      Keys[NKeys] := Key;
+      Inc(NKeys);
+    end;
+    Bucket := Bucket and 7;
+    for M := 0 to Width - 1 do begin
+      B := Literals[L][M];
+      Result[32 * M + (B and 15)] := Result[32 * M + (B and 15)] or (1 shl Bucket);
+      Result[32 * M + 16 + (B shr 4)] := Result[32 * M + 16 + (B shr 4)] or (1 shl Bucket);
+    end;
+  end;
+end;
+
 function BuildTableFinder(const Literals: TByteLists; const Rank: TRanks): TTableFinder;
 var
-  Shortest, BestK, K, L: NativeInt;
+  Shortest, BestK, K, L, N, B: NativeInt;
   BestCost, Cost: Int64;
   V: TBytes;
   F: TTableFinder;
@@ -683,30 +745,98 @@ begin
   F := TTableFinder.Create;
   F.K := BestK;
   F.Shortest := Shortest;
+  F.Literals := Literals;
+  SetLength(F.Lits, Length(Literals));
+  N := 0;
+  for B := 0 to 255 do begin
+    F.FirstAt[B] := N;
+    for L := 0 to High(Literals) do
+      if Literals[L][0] = B then begin
+        F.Lits[N].P := @Literals[L][0];
+        F.Lits[N].Len := Length(Literals[L]);
+        Inc(N);
+      end;
+  end;
+  F.FirstAt[256] := N;
+  F.NSets := Shortest;
+  if F.NSets > PairChecked then
+    F.NSets := PairChecked;
   for L := 0 to High(Literals) do begin
     AddToSet(F.At, Literals[L][BestK]);
-    AddList(F.ByFirst[Literals[L][0]], Literals[L]);
+    for K := 0 to F.NSets - 1 do
+      AddToSet(F.Sets[K], Literals[L][K]);
   end;
+  if HasSsse3 then
+    F.Tab := TeddyTables(Literals, Shortest);
   Result := F;
+end;
+
+{ LiteralAt is the end of the first literal at Q, where Q is at most the end of the text less the shortest literal,
+  or -1: the bytes of the literals' first positions tested first, then the literals of its first byte compared. }
+function TTableFinder.LiteralAt(P: PByte; Q, End_: NativeInt): NativeInt;
+var
+  K, L, Last: NativeInt;
+  Lit: PLit;
+begin
+  for K := 0 to NSets - 1 do
+    if not InSet(Sets[K], P[Q + K]) then
+      Exit(-1);
+  // A pointer to the literals of the byte, so that reading them copies and range checks nothing.
+  Lit := PLit(Pointer(Lits));
+  Last := FirstAt[P[Q] + 1];
+  L := FirstAt[P[Q]];
+  Inc(Lit, L);
+  while L < Last do begin
+    if StartsWith(P, Q, End_, Lit^.P, Lit^.Len) then
+      Exit(Q + Lit^.Len);
+    Inc(Lit);
+    Inc(L);
+  end;
+  Result := -1;
 end;
 
 function TTableFinder.Find(P: PByte; From, End_: NativeInt; out S, E: NativeInt): Boolean;
 var
-  Last, Q, L: NativeInt;
-  Lits: ^TByteLists;
+  Last, Last16, Q, B, EndAt: NativeInt;
+  Lanes: UInt32;
 begin
   Last := End_ - Shortest;
+  if Tab <> nil then begin
+    // Sixteen starts a block (TeddyBlock), which reads up to its last start + 17: its lanes are candidates, each
+    // compared with the literals.
+    Last16 := End_ - 18;
+    if Last16 > Last then
+      Last16 := Last;
+    while From <= Last16 do begin
+      B := TeddyBlock(P, From, Last16, @Tab[0], Lanes);
+      if B < 0 then begin
+        Inc(From, ((Last16 - From) div 16 + 1) * 16);
+        Break;
+      end;
+      while Lanes <> 0 do begin
+        Q := B + NativeInt(BsfDWord(Lanes));
+        if Q <= Last then begin
+          EndAt := LiteralAt(P, Q, End_);
+          if EndAt >= 0 then begin
+            S := Q;
+            E := EndAt;
+            Exit(True);
+          end;
+        end;
+        Lanes := Lanes and (Lanes - 1);
+      end;
+      From := B + 16;
+    end;
+  end;
   // Q + K is below End_ for every Q up to Last.
   for Q := From to Last do
     if ((At[P[Q + K] shr 6] shr (P[Q + K] and 63)) and 1) <> 0 then begin
-      // A pointer to the literals of the byte, so that reading them copies nothing.
-      Lits := @ByFirst[P[Q]];
-      for L := 0 to High(Lits^) do
-        if StartsWith(P, Q, End_, @Lits^[L][0], Length(Lits^[L])) then begin
-          S := Q;
-          E := Q + Length(Lits^[L]);
-          Exit(True);
-        end;
+      EndAt := LiteralAt(P, Q, End_);
+      if EndAt >= 0 then begin
+        S := Q;
+        E := EndAt;
+        Exit(True);
+      end;
     end;
   S := -1;
   E := -1;
@@ -715,6 +845,7 @@ end;
 
 function BuildByteFinder(const Literals: TByteLists; const Rank: TRanks): TByteFinder;
 var
+  Pair: TPairFinder;
   Best: NativeInt;
   One: TOneFinder;
   Rare: TRareFinder;
@@ -742,10 +873,17 @@ begin
     Exit;
   end;
   Result := BuildFirstsFinder(Literals, Rank);
-  if Result = nil then
-    Result := BuildPairFinder(Literals, Rank);
-  if Result = nil then
-    Result := BuildTableFinder(Literals, Rank);
+  if Result <> nil then
+    Exit;
+  // Several literals with no rare first bytes go to Teddy where the processor has it, as the crate takes them to
+  // aho-corasick's Teddy: three positions in one pass turn away more starts than the pair search's two. The cases of
+  // one word stay with the pair search, whose candidates need no comparing (TPairFinder.Every) or whose positions take
+  // one test each (PairBlock).
+  Pair := BuildPairFinder(Literals, Rank);
+  if (Pair <> nil) and (Pair.Every or ((Pair.NI = 1) and (Pair.NJ = 1)) or not HasSsse3) then
+    Exit(Pair);
+  Pair.Free;
+  Result := BuildTableFinder(Literals, Rank);
 end;
 
 function PackedRanks(const Literals: TWordLists): TRanks;
