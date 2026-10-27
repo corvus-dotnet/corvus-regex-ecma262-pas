@@ -281,11 +281,16 @@ end;
   of a window none of whose positions it can be. }
 function SkipAhead(S: TSkipWin; const T: TText; At: NativeInt): NativeInt;
 var
-  N: NativeInt;
+  N, Hi, Len: NativeInt;
+  P: PUnit;
 begin
   N := T.Len;
-  while (At + S.Hi < N) and not S.Hit(U(T, At + S.Hi)) do
-    Inc(At, S.Len);
+  Hi := S.Hi;
+  Len := S.Len;
+  P := T.P;
+  // At + Hi is below the length of the text at each read.
+  while (At + Hi < N) and not S.Hit(P[At + Hi]) do
+    Inc(At, Len);
   Result := At;
 end;
 

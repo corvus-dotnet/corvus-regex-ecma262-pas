@@ -418,8 +418,10 @@ begin
   case F^.Count of
     1: Exit(IndexByte1(T.P, At, N, F^.A));
     2: Exit(IndexByte2(T.P, At, N, F^.A, F^.B));
-    3: Exit(IndexByte4(T.P, At, N, F^.A, F^.B, F^.C, F^.C));
+    3, 4: Exit(IndexByte4(T.P, At, N, F^.A, F^.B, F^.C, F^.D));
   end;
+  if F^.IsRange then
+    Exit(IndexBetween(T.P, At, N, F^.Lo, F^.Hi));
   for K := At to N - 1 do
     if ((F^.Table[T.P[K] shr 6] shr (T.P[K] and 63)) and 1) <> 0 then
       Exit(K);

@@ -125,7 +125,8 @@ type
     Shortest: NativeInt;
     { The two positions, and the masks and values of each one's tests, broadcast. }
     I, J: NativeInt;
-    MI, VI, MJ, VJ: array of UInt64;
+    MI, VI, MJ, VJ: array[0..3] of UInt64;
+    NI, NJ: Int32;
     { For each of the first bytes of the literals up to PairChecked, the values they hold there. }
     Sets: array of TByteSet;
     { The literals are every sequence of the values Sets holds, all of one length (a word's cases written out): a
@@ -464,10 +465,11 @@ var
   F: TPairFinder;
   V: Int32;
 
-  procedure Broadcast(const T: TBytes; var M, Vs: array of UInt64);
+  procedure Broadcast(const T: TBytes; var M, Vs: array of UInt64; out Count: Int32);
   var
     Q: NativeInt;
   begin
+    Count := Length(T) div 2;
     for Q := 0 to Length(T) div 2 - 1 do begin
       M[Q] := Broadcast8(T[2 * Q]);
       Vs[Q] := Broadcast8(T[2 * Q + 1]);
@@ -543,14 +545,8 @@ begin
     Inc(K);
   end;
   F.Every := F.Every and (Product = Length(Literals));
-  V := Length(Tests[BI]) div 2;
-  SetLength(F.MI, V);
-  SetLength(F.VI, V);
-  Broadcast(Tests[BI], F.MI, F.VI);
-  V := Length(Tests[BJ]) div 2;
-  SetLength(F.MJ, V);
-  SetLength(F.VJ, V);
-  Broadcast(Tests[BJ], F.MJ, F.VJ);
+  Broadcast(Tests[BI], F.MI, F.VI, F.NI);
+  Broadcast(Tests[BJ], F.MJ, F.VJ, F.NJ);
   Result := F;
 end;
 
@@ -573,21 +569,26 @@ begin
   Result := -1;
 end;
 
-{ Pass is the lanes of a word that pass the tests, by the cheap test of HasZero, which may flag a lane that does not
-  pass but never misses one: every candidate is compared with the literals. }
-function Pass(X: UInt64; const M, V: array of UInt64): UInt64; inline;
-var
-  K: NativeInt;
+{ Pass is the lanes of a word that pass the tests (N of them, up to four), by the cheap test of HasZero, which may
+  flag a lane that does not pass but never misses one: every candidate is compared with the literals. }
+function Pass(X: UInt64; const M, V: array of UInt64; N: Int32): UInt64; inline;
 begin
   Result := HasZero((X or M[0]) xor V[0]);
-  for K := 1 to High(M) do
-    Result := Result or HasZero((X or M[K]) xor V[K]);
+  if N > 1 then begin
+    Result := Result or HasZero((X or M[1]) xor V[1]);
+    if N > 2 then begin
+      Result := Result or HasZero((X or M[2]) xor V[2]);
+      if N > 3 then
+        Result := Result or HasZero((X or M[3]) xor V[3]);
+    end;
+  end;
 end;
 
 function TPairFinder.Find(P: PByte; From, End_: NativeInt; out S, E: NativeInt): Boolean;
 var
-  Last, At, Blocks, Q, EndAt, Far: NativeInt;
+  Last, At, Blocks, Q, EndAt, Far, Last16: NativeInt;
   M, MIW, VIW, MJW, VJW: UInt64;
+  Lanes: UInt32;
 begin
   S := -1;
   E := -1;
@@ -600,30 +601,36 @@ begin
   if J > Far then
     Far := J;
   Blocks := End_ - 8 - Far;
-  if (Length(MI) = 1) and (Length(MJ) = 1) then begin
+  if (NI = 1) and (NJ = 1) then begin
+    // Sixteen starts a block (PairBlock): its lanes are candidates, each compared with the literals.
     MIW := MI[0];
     VIW := VI[0];
     MJW := MJ[0];
     VJW := VJ[0];
-    while At <= Blocks do begin
-      M := HasZero((Word8(P, At + I) or MIW) xor VIW) and HasZero((Word8(P, At + J) or MJW) xor VJW);
-      while M <> 0 do begin
-        Q := At + Lane(M);
-        if Q <= Last then begin
-          EndAt := LiteralAt(P, Q, End_);
+    Last16 := End_ - 16 - Far;
+    while At <= Last16 do begin
+      Q := PairBlock(P, At, Last16, I, J, MIW, VIW, MJW, VJW, Lanes);
+      if Q < 0 then begin
+        Inc(At, ((Last16 - At) div 16 + 1) * 16);
+        Break;
+      end;
+      while Lanes <> 0 do begin
+        S := Q + NativeInt(BsfDWord(Lanes));
+        if S <= Last then begin
+          EndAt := LiteralAt(P, S, End_);
           if EndAt >= 0 then begin
-            S := Q;
             E := EndAt;
             Exit(True);
           end;
         end;
-        M := M and (M - 1);
+        Lanes := Lanes and (Lanes - 1);
       end;
-      Inc(At, 8);
+      At := Q + 16;
     end;
+    S := -1;
   end else
     while At <= Blocks do begin
-      M := Pass(Word8(P, At + I), MI, VI) and Pass(Word8(P, At + J), MJ, VJ);
+      M := Pass(Word8(P, At + I), MI, VI, NI) and Pass(Word8(P, At + J), MJ, VJ, NJ);
       while M <> 0 do begin
         Q := At + Lane(M);
         if Q <= Last then begin

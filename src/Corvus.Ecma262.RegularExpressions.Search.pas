@@ -74,7 +74,10 @@ type
     sixty-four, which is the set the crate finds with the fingerprint search of one-byte literals. }
   TFirstBytes = record
     Count: Int32;
-    A, B, C: Byte;
+    A, B, C, D: Byte;
+    { The bytes are the ASCII ones from Lo to Hi, which one compare of a word finds (the digits, the letters). }
+    IsRange: Boolean;
+    Lo, Hi: Byte;
     Table: array[0..3] of UInt64;
   end;
 
@@ -289,6 +292,10 @@ begin
   F.A := List[0];
   if N >= 2 then F.B := List[1] else F.B := List[N - 1];
   if N >= 3 then F.C := List[2] else F.C := List[N - 1];
+  if N >= 4 then F.D := List[3] else F.D := List[N - 1];
+  F.Lo := List[0];
+  F.Hi := List[N - 1];
+  F.IsRange := (N > 4) and (F.Hi < $80) and (F.Hi - F.Lo = N - 1);
   Result := True;
 end;
 

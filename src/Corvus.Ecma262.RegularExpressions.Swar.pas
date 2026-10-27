@@ -49,6 +49,13 @@ function IndexBetween(P: PByte; From, N: NativeInt; Lo, Hi: Byte): NativeInt;
 { StartsWith reports whether the Len bytes from Lit are at P[At], before End_. }
 function StartsWith(P: PByte; At, End_: NativeInt; Lit: PByte; Len: NativeInt): Boolean; inline;
 
+{ PairBlock finds the first block of sixteen starts, from the start At by steps of sixteen up to (not past) Last,
+  at which a start S has (P[S + I] or MI) = VI and (P[S + J] or MJ) = VJ for some lane (each a byte broadcast to a
+  word): it returns that block's first start and the lanes in Lanes (bit k for the start + k), or -1. The caller
+  checks that every byte read, up to Last + Max(I, J) + 15, lies within the text. Over x86_64 it reads sixteen bytes
+  at a time with SSE2, and over any other processor eight at a time as words. }
+function PairBlock(P: PByte; At, Last, I, J: NativeInt; MI, VI, MJ, VJ: UInt64; out Lanes: UInt32): NativeInt;
+
 { IndexUnit is the first position at or after From and before N whose UTF-16 unit is V, or -1. }
 function IndexUnit(P: PUInt16; From, N: NativeInt; V: UInt16): NativeInt;
 { HasUnits16 reports whether the Len units from Lit are at P[At] of a text of N units. }
@@ -87,6 +94,294 @@ begin
   Result := (X - Ones) and not X and Highs;
 end;
 
+{$IFDEF CPUX86_64}
+{$ASMMODE INTEL}
+
+(* The SSE2 kernels. Each reads Blocks blocks of sixteen bytes from Base and returns the offset of the first byte that
+  passes, or -1 when none of the blocks holds one. The arguments are copied into locals first, which the asm block
+  reads, so that nothing depends on the registers the calling convention of the system puts them in; the blocks use
+  only registers both conventions let a routine overwrite (rax, rcx, rdx, r8 to r11, xmm0 to xmm5). A constant is a
+  byte broadcast to a word (Broadcast8), which the block broadcasts to the sixteen lanes. *)
+
+{ VecEq2 passes a byte equal to A or B. }
+function VecEq2(Base: PByte; Blocks: NativeInt; A, B: UInt64): NativeInt;
+var
+  LBase: PByte;
+  LBlocks, R: NativeInt;
+  LA, LB: UInt64;
+begin
+  LBase := Base;
+  LBlocks := Blocks;
+  LA := A;
+  LB := B;
+  R := -1;
+  if LBlocks > 0 then
+    asm
+      mov rdx, LBase
+      mov rcx, LBlocks
+      mov rax, LA
+      movq xmm1, rax
+      punpcklqdq xmm1, xmm1
+      mov rax, LB
+      movq xmm2, rax
+      punpcklqdq xmm2, xmm2
+      xor r8, r8
+    @loop:
+      movdqu xmm0, [rdx + r8]
+      movdqa xmm3, xmm0
+      pcmpeqb xmm0, xmm1
+      pcmpeqb xmm3, xmm2
+      por xmm0, xmm3
+      pmovmskb eax, xmm0
+      test eax, eax
+      jnz @found
+      add r8, 16
+      dec rcx
+      jnz @loop
+      jmp @done
+    @found:
+      bsf eax, eax
+      add rax, r8
+      mov R, rax
+    @done:
+    end ['rax', 'rcx', 'rdx', 'r8', 'xmm0', 'xmm1', 'xmm2', 'xmm3'];
+  Result := R;
+end;
+
+{ VecEq4 passes a byte equal to one of A, B, C and D. }
+function VecEq4(Base: PByte; Blocks: NativeInt; A, B, C, D: UInt64): NativeInt;
+var
+  LBase: PByte;
+  LBlocks, R: NativeInt;
+  LA, LB, LC, LD: UInt64;
+begin
+  LBase := Base;
+  LBlocks := Blocks;
+  LA := A;
+  LB := B;
+  LC := C;
+  LD := D;
+  R := -1;
+  if LBlocks > 0 then
+    asm
+      mov rdx, LBase
+      mov rcx, LBlocks
+      mov rax, LA
+      movq xmm1, rax
+      punpcklqdq xmm1, xmm1
+      mov rax, LB
+      movq xmm2, rax
+      punpcklqdq xmm2, xmm2
+      mov rax, LC
+      movq xmm4, rax
+      punpcklqdq xmm4, xmm4
+      mov rax, LD
+      movq xmm5, rax
+      punpcklqdq xmm5, xmm5
+      xor r8, r8
+    @loop:
+      movdqu xmm0, [rdx + r8]
+      pcmpeqb xmm0, xmm1
+      movdqu xmm3, [rdx + r8]
+      pcmpeqb xmm3, xmm2
+      por xmm0, xmm3
+      movdqu xmm3, [rdx + r8]
+      pcmpeqb xmm3, xmm4
+      por xmm0, xmm3
+      movdqu xmm3, [rdx + r8]
+      pcmpeqb xmm3, xmm5
+      por xmm0, xmm3
+      pmovmskb eax, xmm0
+      test eax, eax
+      jnz @found
+      add r8, 16
+      dec rcx
+      jnz @loop
+      jmp @done
+    @found:
+      bsf eax, eax
+      add rax, r8
+      mov R, rax
+    @done:
+    end ['rax', 'rcx', 'rdx', 'r8', 'xmm0', 'xmm1', 'xmm2', 'xmm3', 'xmm4', 'xmm5'];
+  Result := R;
+end;
+
+{ VecRange passes a byte from Lo to Lo + Width: the byte less Lo, which wraps below it, is at most Width. }
+function VecRange(Base: PByte; Blocks: NativeInt; Lo, Width: UInt64): NativeInt;
+var
+  LBase: PByte;
+  LBlocks, R: NativeInt;
+  LLo, LWidth: UInt64;
+begin
+  LBase := Base;
+  LBlocks := Blocks;
+  LLo := Lo;
+  LWidth := Width;
+  R := -1;
+  if LBlocks > 0 then
+    asm
+      mov rdx, LBase
+      mov rcx, LBlocks
+      mov rax, LLo
+      movq xmm1, rax
+      punpcklqdq xmm1, xmm1
+      mov rax, LWidth
+      movq xmm2, rax
+      punpcklqdq xmm2, xmm2
+      xor r8, r8
+    @loop:
+      movdqu xmm0, [rdx + r8]
+      psubb xmm0, xmm1
+      movdqa xmm3, xmm0
+      pminub xmm3, xmm2
+      pcmpeqb xmm0, xmm3
+      pmovmskb eax, xmm0
+      test eax, eax
+      jnz @found
+      add r8, 16
+      dec rcx
+      jnz @loop
+      jmp @done
+    @found:
+      bsf eax, eax
+      add rax, r8
+      mov R, rax
+    @done:
+    end ['rax', 'rcx', 'rdx', 'r8', 'xmm0', 'xmm1', 'xmm2', 'xmm3'];
+  Result := R;
+end;
+
+{ VecEqW passes a UTF-16 unit equal to V (a unit broadcast to a word), eight units a block; the offset is in units. }
+function VecEqW(Base: PUInt16; Blocks: NativeInt; V: UInt64): NativeInt;
+var
+  LBase: PUInt16;
+  LBlocks, R: NativeInt;
+  LV: UInt64;
+begin
+  LBase := Base;
+  LBlocks := Blocks;
+  LV := V;
+  R := -1;
+  if LBlocks > 0 then
+    asm
+      mov rdx, LBase
+      mov rcx, LBlocks
+      mov rax, LV
+      movq xmm1, rax
+      punpcklqdq xmm1, xmm1
+      xor r8, r8
+    @loop:
+      movdqu xmm0, [rdx + r8]
+      pcmpeqw xmm0, xmm1
+      pmovmskb eax, xmm0
+      test eax, eax
+      jnz @found
+      add r8, 16
+      dec rcx
+      jnz @loop
+      jmp @done
+    @found:
+      bsf eax, eax
+      add rax, r8
+      shr rax, 1
+      mov R, rax
+    @done:
+    end ['rax', 'rcx', 'rdx', 'r8', 'xmm0', 'xmm1'];
+  Result := R;
+end;
+
+function PairBlock(P: PByte; At, Last, I, J: NativeInt; MI, VI, MJ, VJ: UInt64; out Lanes: UInt32): NativeInt;
+var
+  LPI, LPJ: PByte;
+  LBlocks, R: NativeInt;
+  LMI, LVI, LMJ, LVJ: UInt64;
+  LMask: UInt32;
+begin
+  Lanes := 0;
+  if At > Last then
+    Exit(-1);
+  LPI := @P[At + I];
+  LPJ := @P[At + J];
+  LBlocks := (Last - At) div 16 + 1;
+  LMI := MI;
+  LVI := VI;
+  LMJ := MJ;
+  LVJ := VJ;
+  R := -1;
+  LMask := 0;
+  asm
+    mov rdx, LPI
+    mov r9, LPJ
+    mov rcx, LBlocks
+    mov rax, LMI
+    movq xmm1, rax
+    punpcklqdq xmm1, xmm1
+    mov rax, LVI
+    movq xmm2, rax
+    punpcklqdq xmm2, xmm2
+    mov rax, LMJ
+    movq xmm4, rax
+    punpcklqdq xmm4, xmm4
+    mov rax, LVJ
+    movq xmm5, rax
+    punpcklqdq xmm5, xmm5
+    xor r8, r8
+  @loop:
+    movdqu xmm0, [rdx + r8]
+    por xmm0, xmm1
+    pcmpeqb xmm0, xmm2
+    movdqu xmm3, [r9 + r8]
+    por xmm3, xmm4
+    pcmpeqb xmm3, xmm5
+    pand xmm0, xmm3
+    pmovmskb eax, xmm0
+    test eax, eax
+    jnz @found
+    add r8, 16
+    dec rcx
+    jnz @loop
+    jmp @done
+  @found:
+    mov LMask, eax
+    mov R, r8
+  @done:
+  end ['rax', 'rcx', 'rdx', 'r8', 'r9', 'xmm0', 'xmm1', 'xmm2', 'xmm3', 'xmm4', 'xmm5'];
+  if R < 0 then
+    Exit(-1);
+  Lanes := LMask;
+  Result := At + R;
+end;
+
+{$ELSE}
+
+function PairBlock(P: PByte; At, Last, I, J: NativeInt; MI, VI, MJ, VJ: UInt64; out Lanes: UInt32): NativeInt;
+var
+  M0, M1: UInt64;
+  K: Int32;
+begin
+  // Eight starts a word, two words a block; a flagged lane of HasZero may not pass, and the finder compares it.
+  while At <= Last do begin
+    M0 := HasZero((Word8(P, At + I) or MI) xor VI) and HasZero((Word8(P, At + J) or MJ) xor VJ);
+    M1 := HasZero((Word8(P, At + 8 + I) or MI) xor VI) and HasZero((Word8(P, At + 8 + J) or MJ) xor VJ);
+    if (M0 or M1) <> 0 then begin
+      Lanes := 0;
+      for K := 0 to 7 do begin
+        if ((M0 shr (8 * K + 7)) and 1) <> 0 then
+          Lanes := Lanes or (UInt32(1) shl K);
+        if ((M1 shr (8 * K + 7)) and 1) <> 0 then
+          Lanes := Lanes or (UInt32(1) shl (8 + K));
+      end;
+      Exit(At);
+    end;
+    Inc(At, 16);
+  end;
+  Lanes := 0;
+  Result := -1;
+end;
+
+{$ENDIF}
+
 function IndexByte1(P: PByte; From, N: NativeInt; B: Byte): NativeInt;
 var
   K: SizeInt;
@@ -104,6 +399,14 @@ var
   VA, VB, W0, W1, X, Z: UInt64;
   At: NativeInt;
 begin
+  {$IFDEF CPUX86_64}
+  if N - From >= 16 then begin
+    At := VecEq2(@P[From], (N - From) div 16, Broadcast8(A), Broadcast8(B));
+    if At >= 0 then
+      Exit(From + At);
+    Inc(From, ((N - From) div 16) * 16);
+  end;
+  {$ENDIF}
   VA := Broadcast8(A);
   VB := Broadcast8(B);
   At := From;
@@ -141,6 +444,14 @@ var
   At: NativeInt;
   X: Byte;
 begin
+  {$IFDEF CPUX86_64}
+  if N - From >= 16 then begin
+    At := VecEq4(@P[From], (N - From) div 16, Broadcast8(A), Broadcast8(B), Broadcast8(C), Broadcast8(D));
+    if At >= 0 then
+      Exit(From + At);
+    Inc(From, ((N - From) div 16) * 16);
+  end;
+  {$ENDIF}
   VA := Broadcast8(A);
   VB := Broadcast8(B);
   VC := Broadcast8(C);
@@ -181,6 +492,14 @@ var
   At: NativeInt;
   X: Byte;
 begin
+  {$IFDEF CPUX86_64}
+  if N - From >= 16 then begin
+    At := VecRange(@P[From], (N - From) div 16, Broadcast8(Lo), Broadcast8(Hi - Lo));
+    if At >= 0 then
+      Exit(From + At);
+    Inc(From, ((N - From) div 16) * 16);
+  end;
+  {$ENDIF}
   VL := Broadcast8($80 - Lo);
   VH := Broadcast8($7F - Hi);
   At := From;
@@ -248,6 +567,14 @@ var
   VV, W0, W1, W2, W3, Z: UInt64;
   At: NativeInt;
 begin
+  {$IFDEF CPUX86_64}
+  if N - From >= 8 then begin
+    At := VecEqW(@P[From], (N - From) div 8, UInt64(V) * Ones16);
+    if At >= 0 then
+      Exit(From + At);
+    Inc(From, ((N - From) div 8) * 8);
+  end;
+  {$ENDIF}
   VV := UInt64(V) * Ones16;
   At := From;
   while At <= N - 16 do begin
