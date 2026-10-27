@@ -71,13 +71,19 @@ function PairBlockN(P: PByte; At, Last, I, J: NativeInt; Consts: PByte; NI, NJ: 
 function IndexRanges(P: PByte; From, N: NativeInt; Consts: PByte; NR: Int32): NativeInt;
 
 { TeddyBlock finds the first block of sixteen starts, from the start At by steps of sixteen up to (not past) Last, at
-  which some start S passes the nibble tables of Teddy (the searcher of the Rust crate aho-corasick, which the crate
-  takes for several literals): for each of the positions 0, 1 and 2, the table of the low nibble of P[S + m] and the
-  table of its high nibble give a byte of buckets each, and S passes where some bucket is in all six. Tab holds
-  sixteen bytes of each table, low then high, for positions 0 to 2, then sixteen bytes of $0F: 112 bytes. It returns
-  that block's first start and the lanes in Lanes (bit k for the start + k), or -1. The caller checks that every byte
-  read, up to Last + 17, lies within the text. It takes SSSE3 (HasSsse3); over any other processor it tests a start
-  at a time. }
+  which some start S passes the nibble tables of Teddy: for each of the positions 0, 1 and 2, the table of the low
+  nibble of P[S + m] and the table of its high nibble give a byte of buckets each, and S passes where some bucket is
+  in all six. Tab holds sixteen bytes of each table, low then high, for positions 0 to 2, then sixteen bytes of $0F:
+  112 bytes. It returns that block's first start and the lanes in Lanes (bit k for the start + k), or -1. The caller
+  checks that every byte read, up to Last + 17, lies within the text. It takes SSSE3 (HasSsse3); over any other
+  processor it tests a start at a time.
+
+  Teddy is Geoff Langdale's search for a few literals in Intel's Hyperscan (src/fdr/teddy.c in
+  https://github.com/intel/hyperscan), which the Rust crate aho-corasick ports and the crate takes for several
+  literals. The fullest description of it, with the masks worked through and the papers it rests on, is the README of
+  aho-corasick's port: https://github.com/BurntSushi/aho-corasick/blob/master/src/packed/teddy/README.md. This kernel
+  loads the text at each position's offset, where those shift one load, and leaves the buckets' verification to the
+  finder (TTableFinder.LiteralAt). }
 function TeddyBlock(P: PByte; At, Last: NativeInt; Tab: PByte; out Lanes: UInt32): NativeInt;
 
 { HasSsse3 reports whether the processor has SSSE3, whose byte shuffle TeddyBlock reads its tables with. }
