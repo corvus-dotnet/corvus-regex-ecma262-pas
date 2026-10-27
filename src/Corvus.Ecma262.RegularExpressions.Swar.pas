@@ -93,6 +93,10 @@ function Eq2Block(P: PByte; At, Last, I, J: NativeInt; A, B: Byte; out Lanes: UI
 { HasAvx2 reports whether the processor has AVX2 and the system saves its registers. }
 function HasAvx2: Boolean;
 
+{ IndexRun is the first position at or after From of a run of Len bytes (from one to sixty-four), all before N, each
+  in one of NR ranges (as IndexRanges takes them), or -1. }
+function IndexRun(P: PByte; From, N: NativeInt; Consts: PByte; NR: Int32; Len: NativeInt): NativeInt;
+
 { VecConsts writes the pairs of bytes Pairs (a mask and a value, or a least byte and a width), each pair as sixteen
   copies of the one and then sixteen of the other, for PairBlockN and IndexRanges. }
 procedure VecConsts(const Pairs: array of Byte; var Consts: TBytes);
@@ -231,6 +235,180 @@ begin
     @done:
       vzeroupper
     end ['rax', 'rcx', 'rdx', 'r8', 'r9', 'xmm0', 'xmm1', 'xmm2', 'xmm3'];
+  Result := R;
+end;
+
+{ RangesMask is a bit for each of the sixty-four bytes at Base that is in one of NR ranges (bit k for Base[k]). }
+function RangesMask(Base: PByte; Consts: PByte; NR: Int32): UInt64;
+var
+  LBase, LConsts: PByte;
+  LNR: NativeInt;
+  R: UInt64;
+begin
+  LBase := Base;
+  LConsts := Consts;
+  LNR := NR;
+  asm
+    mov rdx, LBase
+    xor r9, r9
+    xor r8, r8
+  @block:
+    pxor xmm0, xmm0
+    mov r10, LConsts
+    mov r11, LNR
+  @range:
+    movdqu xmm1, [rdx + r8]
+    movdqu xmm2, [r10]
+    psubb xmm1, xmm2
+    movdqu xmm2, [r10 + 16]
+    movdqa xmm3, xmm1
+    pminub xmm3, xmm2
+    pcmpeqb xmm1, xmm3
+    por xmm0, xmm1
+    add r10, 32
+    dec r11
+    jnz @range
+    pmovmskb eax, xmm0
+    mov rcx, r8
+    shl rax, cl
+    or r9, rax
+    add r8, 16
+    cmp r8, 64
+    jne @block
+    mov R, r9
+  end ['rax', 'rcx', 'rdx', 'r8', 'r9', 'r10', 'r11', 'xmm0', 'xmm1', 'xmm2', 'xmm3'];
+  Result := R;
+end;
+
+{ RangesMaskAvx2 is RangesMask with AVX2: two blocks of thirty-two, each range's sixteen bytes in both halves. }
+function RangesMaskAvx2(Base: PByte; Consts: PByte; NR: Int32): UInt64;
+var
+  LBase, LConsts: PByte;
+  LNR: NativeInt;
+  R: UInt64;
+begin
+  LBase := Base;
+  LConsts := Consts;
+  LNR := NR;
+  asm
+    mov rdx, LBase
+    vmovdqu ymm4, [rdx]
+    vmovdqu ymm5, [rdx + 32]
+    vpxor ymm0, ymm0, ymm0
+    vpxor ymm3, ymm3, ymm3
+    mov r10, LConsts
+    mov r11, LNR
+  @range:
+    vbroadcasti128 ymm1, [r10]
+    vbroadcasti128 ymm2, [r10 + 16]
+    vpsubb ymm1, ymm4, ymm1
+    vpminub ymm2, ymm1, ymm2
+    vpcmpeqb ymm1, ymm1, ymm2
+    vpor ymm0, ymm0, ymm1
+    vbroadcasti128 ymm1, [r10]
+    vbroadcasti128 ymm2, [r10 + 16]
+    vpsubb ymm1, ymm5, ymm1
+    vpminub ymm2, ymm1, ymm2
+    vpcmpeqb ymm1, ymm1, ymm2
+    vpor ymm3, ymm3, ymm1
+    add r10, 32
+    dec r11
+    jnz @range
+    vpmovmskb eax, ymm0
+    vpmovmskb ecx, ymm3
+    shl rcx, 32
+    or rax, rcx
+    mov R, rax
+    vzeroupper
+  end ['rax', 'rcx', 'rdx', 'r10', 'r11', 'xmm0', 'xmm1', 'xmm2', 'xmm3', 'xmm4', 'xmm5'];
+  Result := R;
+end;
+
+{ RunBlocksAvx2 is the blocks of IndexRun with AVX2, all in one loop: Blocks blocks of sixty-four bytes from Base,
+  each Step on from the last, the bits of each block's bytes in the ranges, the runs of Len found by doubling and kept
+  under StepMask. It returns the offset from Base of the first start found, or -1. }
+function RunBlocksAvx2(Base: PByte; Blocks: NativeInt; Consts: PByte; NR: Int32; Len, Step: NativeInt;
+  StepMask: UInt64): NativeInt;
+var
+  LBase, LConsts: PByte;
+  LBlocks, LNR, LLen, LStep, R: NativeInt;
+  LStepMask: UInt64;
+begin
+  LBase := Base;
+  LBlocks := Blocks;
+  LConsts := Consts;
+  LNR := NR;
+  LLen := Len;
+  LStep := Step;
+  LStepMask := StepMask;
+  R := -1;
+  if LBlocks > 0 then
+    asm
+      mov rdx, LBase
+      xor r9, r9
+    @block:
+      vmovdqu ymm4, [rdx + r9]
+      vmovdqu ymm5, [rdx + r9 + 32]
+      vpxor ymm0, ymm0, ymm0
+      vpxor ymm3, ymm3, ymm3
+      mov r10, LConsts
+      mov r11, LNR
+    @range:
+      vbroadcasti128 ymm1, [r10]
+      vbroadcasti128 ymm2, [r10 + 16]
+      vpsubb ymm1, ymm4, ymm1
+      vpminub ymm2, ymm1, ymm2
+      vpcmpeqb ymm1, ymm1, ymm2
+      vpor ymm0, ymm0, ymm1
+      vbroadcasti128 ymm1, [r10]
+      vbroadcasti128 ymm2, [r10 + 16]
+      vpsubb ymm1, ymm5, ymm1
+      vpminub ymm2, ymm1, ymm2
+      vpcmpeqb ymm1, ymm1, ymm2
+      vpor ymm3, ymm3, ymm1
+      add r10, 32
+      dec r11
+      jnz @range
+      vpmovmskb eax, ymm0
+      vpmovmskb ecx, ymm3
+      shl rcx, 32
+      or rax, rcx
+      mov r8, rax
+      mov ecx, 1
+    @double:
+      test r8, r8
+      jz @next
+      lea r11, [rcx + rcx]
+      cmp r11, LLen
+      jg @rest
+      mov rax, r8
+      shr rax, cl
+      and r8, rax
+      mov rcx, r11
+      jmp @double
+    @rest:
+      mov r11, LLen
+      sub r11, rcx
+      jz @mask
+      mov rcx, r11
+      mov rax, r8
+      shr rax, cl
+      and r8, rax
+    @mask:
+      and r8, LStepMask
+      jnz @found
+    @next:
+      add r9, LStep
+      dec LBlocks
+      jnz @block
+      jmp @done
+    @found:
+      bsf r8, r8
+      add r8, r9
+      mov R, r8
+    @done:
+      vzeroupper
+    end ['rax', 'rcx', 'rdx', 'r8', 'r9', 'r10', 'r11', 'xmm0', 'xmm1', 'xmm2', 'xmm3', 'xmm4', 'xmm5'];
   Result := R;
 end;
 
@@ -839,6 +1017,25 @@ begin
   Result := False;
 end;
 
+function RangesMask(Base: PByte; Consts: PByte; NR: Int32): UInt64;
+var
+  K: NativeInt;
+  T: Int32;
+begin
+  Result := 0;
+  for K := 0 to 63 do
+    for T := 0 to NR - 1 do
+      if Byte(Base[K] - Consts[32 * T]) <= Consts[32 * T + 16] then begin
+        Result := Result or (UInt64(1) shl K);
+        Break;
+      end;
+end;
+
+function RangesMaskAvx2(Base: PByte; Consts: PByte; NR: Int32): UInt64;
+begin
+  Result := RangesMask(Base, Consts, NR);
+end;
+
 function Eq2Block(P: PByte; At, Last, I, J: NativeInt; A, B: Byte; out Lanes: UInt64): NativeInt;
 var
   S: NativeInt;
@@ -1085,6 +1282,64 @@ begin
     for T := 0 to NR - 1 do
       if Byte(P[At] - Consts[32 * T]) <= Consts[32 * T + 16] then
         Exit(At);
+  Result := -1;
+end;
+
+function IndexRun(P: PByte; From, N: NativeInt; Consts: PByte; NR: Int32; Len: NativeInt): NativeInt;
+var
+  M: UInt64;
+  K, Run, At, Have, Step: NativeInt;
+  T: Int32;
+  Hit: Boolean;
+begin
+  // Sixty-four bytes a block: the bits of the bytes in the ranges, a start passing where its next Len - 1 bits are
+  // set too, found by doubling the runs (1, 2, 4, ...) and kept where the run lies in the block; a block steps on by
+  // the starts it decides.
+  Step := 65 - Len;
+  {$IFDEF CPUX86_64}
+  if Avx2 and (N - From >= 64) then begin
+    if Step < 64 then
+      M := (UInt64(1) shl Step) - 1
+    else
+      M := High(UInt64);
+    K := (N - From - 64) div Step + 1;
+    At := RunBlocksAvx2(@P[From], K, Consts, NR, Len, Step, M);
+    if At >= 0 then
+      Exit(From + At);
+    Inc(From, K * Step);
+  end;
+  {$ENDIF}
+  while N - From >= 64 do begin
+    if Avx2 then
+      M := RangesMaskAvx2(@P[From], Consts, NR)
+    else
+      M := RangesMask(@P[From], Consts, NR);
+    Have := 1;
+    while (M <> 0) and (Have * 2 <= Len) do begin
+      M := M and (M shr Have);
+      Have := Have * 2;
+    end;
+    if (M <> 0) and (Have < Len) then
+      M := M and (M shr (Len - Have));
+    if Step < 64 then
+      M := M and ((UInt64(1) shl Step) - 1);
+    if M <> 0 then
+      Exit(From + NativeInt(BsfQWord(M)));
+    Inc(From, Step);
+  end;
+  Run := 0;
+  for At := From to N - 1 do begin
+    Hit := False;
+    for T := 0 to NR - 1 do
+      if Byte(P[At] - Consts[32 * T]) <= Consts[32 * T + 16] then
+        Hit := True;
+    if Hit then begin
+      Inc(Run);
+      if Run >= Len then
+        Exit(At - Len + 1);
+    end else
+      Run := 0;
+  end;
   Result := -1;
 end;
 

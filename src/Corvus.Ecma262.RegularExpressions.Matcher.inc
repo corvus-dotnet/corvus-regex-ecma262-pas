@@ -281,13 +281,22 @@ end;
   of a window none of whose positions it can be. }
 function SkipAhead(S: TSkipWin; const T: TText; At: NativeInt): NativeInt;
 var
-  N, Hi, Len: NativeInt;
+  N, Hi, Len, Lo, Q: NativeInt;
   P: PUnit;
 begin
   N := T.Len;
   Hi := S.Hi;
   Len := S.Len;
   P := T.P;
+  if (SizeOf(TUnit) = 1) and (S.NRanges > 0) and (Len <= 64) and (At + Hi < N) then begin
+    // Over UTF-8, the first run of bytes the window holds as long as the window, from At's place Lo (IndexRun): a
+    // start has a byte the window holds at each place from Lo to Hi.
+    Lo := Hi - Len + 1;
+    Q := IndexRun(PByte(P), At + Lo, N, @S.RangeConsts[0], S.NRanges, Len);
+    if Q >= 0 then
+      Exit(Q - Lo);
+    Exit(At + ((N - Hi - At + Len - 1) div Len) * Len);
+  end;
   // At + Hi is below the length of the text at each read.
   while (At + Hi < N) and not S.Hit(P[At + Hi]) do
     Inc(At, Len);

@@ -22,9 +22,11 @@ unit Corvus.Ecma262.RegularExpressions.Adfa;
 interface
 
 uses
+  SysUtils,
   Corvus.Ecma262.RegularExpressions.CharSet,
   Corvus.Ecma262.RegularExpressions.Syntax,
-  Corvus.Ecma262.RegularExpressions.Maps;
+  Corvus.Ecma262.RegularExpressions.Maps,
+  Corvus.Ecma262.RegularExpressions.Swar;
 
 const
   { The state with no thread left: no match can end further on. }
@@ -79,6 +81,11 @@ type
     Len: NativeInt;
     Table: array[0..1] of UInt64;
     Wide: Boolean;
+    { The bytes Hit passes over UTF-8 as up to four ranges as IndexRanges reads them (each run of the table, any
+      byte beyond ASCII where Wide, the nearest runs joined until four are left, which passes more and so rules out
+      no start it should not), and their number. }
+    NRanges: Int32;
+    RangeConsts: TBytes;
     { Hit reports whether the unit can be at some position of the window. }
     function Hit(C: UInt32): Boolean; inline;
   end;
@@ -933,6 +940,55 @@ begin
   Result := True;
 end;
 
+{ WindowRanges sets the ranges of a window's bytes (TSkipWin.RangeConsts). }
+procedure WindowRanges(W: TSkipWin);
+var
+  Lo, Hi: array[0..128] of Int32;
+  N, B, X, K, Best: Int32;
+  Pairs: TBytes;
+begin
+  N := 0;
+  B := 0;
+  while B < $80 do begin
+    if ((W.Table[B shr 6] shr (B and 63)) and 1) <> 0 then begin
+      X := B;
+      while (B + 1 < $80) and (((W.Table[(B + 1) shr 6] shr ((B + 1) and 63)) and 1) <> 0) do
+        Inc(B);
+      Lo[N] := X;
+      Hi[N] := B;
+      Inc(N);
+    end;
+    Inc(B);
+  end;
+  if W.Wide then begin
+    Lo[N] := $80;
+    Hi[N] := $FF;
+    Inc(N);
+  end;
+  if N = 0 then
+    Exit;
+  while N > 4 do begin
+    // The two runs with the least between them become one.
+    Best := 0;
+    for K := 1 to N - 2 do
+      if Lo[K + 1] - Hi[K] < Lo[Best + 1] - Hi[Best] then
+        Best := K;
+    Hi[Best] := Hi[Best + 1];
+    for K := Best + 1 to N - 2 do begin
+      Lo[K] := Lo[K + 1];
+      Hi[K] := Hi[K + 1];
+    end;
+    Dec(N);
+  end;
+  SetLength(Pairs, 2 * N);
+  for K := 0 to N - 1 do begin
+    Pairs[2 * K] := Lo[K];
+    Pairs[2 * K + 1] := Hi[K] - Lo[K];
+  end;
+  W.NRanges := N;
+  VecConsts(Pairs, W.RangeConsts);
+end;
+
 function SkipWindow(Root: TNode): TSkipWin;
 type
   TTable = array[0..1] of UInt64;
@@ -1021,6 +1077,7 @@ begin
   end;
   W.Hi := BestHi;
   W.Len := BestHi - BestLo + 1;
+  WindowRanges(W);
   Result := W;
 end;
 
