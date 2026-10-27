@@ -230,7 +230,9 @@ const
     '\p{Sm}', '', '(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9])', '',
     'Шерлок Холмс|Джон Уотсон', 'i', '夏洛克|福尔摩斯', '', 'sk', 'i', 'ks', 'i', '\u{1F600}a|b\u{10400}', '',
     'a\u{1F600}', '', '\ud83d', '', 'x*y', '', '[a-c]*b+c', '', '(?:ab)?c', '', '\béé\w*', '');
-  More: array[0..75] of UTF8String = (
+  More: array[0..83] of UTF8String = (
+    // One literal with no ASCII byte rare enough alone: a capital's last byte alone, then the two rarest bytes.
+    'Шерлок', '', 'Éa', '', 'aé', '', '洛克', '',
     '(?<=a)b|c', '', '[\p{L}--[a-z]]+t', 'v', '[\q{abc|de}x]y', 'v', '\w+', '', '.*', '', '.+', 's', '[^\n]*', '',
     '[^\n.]+', '', '\p{L}', '', '[\ud800-\udfff]', '', 'Tom|river|Tomas', '', 'ab|a', '', 'sherlock|holmes|k', 'i',
     '\u{1F600}|Ш', '', '(|([^a]|[^a][^a]){2,4}){2}(\3){3,5}?x', '', '[^a]{0,3}(?:xx|x)', '',
@@ -238,10 +240,10 @@ const
     '\b\d\d:\d\d\b', '', '[A-Z]{2}\d{2}', '', '(?:1|22|333)\.5\.\d', '', '\d{2}[é5]\d', 'u', '\d{3}[éèêë5]', 'u',
     '^abc', 'm', 'x{0}^abc', '', '\babc\b', '', 'abc\s+\w+', '', 'Sherlock\s+\w+', '', 'a|bc|def', '',
     'colou?r|grey', 'i', '[^a]+b', '', '(?:a|b)+c', '', '\d+', '', '[\d,]+', '', 'x(?:y|z)w', '', 'ab*c|d', '');
-  Alphabet: array[0..60] of UTF8String = (
+  Alphabet: array[0..61] of UTF8String = (
     'a', 'b', 'c', 'e', 'i', 'k', 'n', 's', 't', 'x', 'y', 'g', 'S', 'K', ' ', #10, '.', '@', '1', '2', '5', '+',
     '=', 'ſ', 'K', 'é', 'Ш', 'е', 'р', 'л', 'о', 'к', 'Х', '夏', '洛', '克', '😀', '𐐀', 'ing', 'Tom', 'river',
-    'Holmes', 'Sherlock', 'sherLOCK', 'awyer', 'inn', 'Watson', 'Шерлок Холмс', '夏洛克', 'abc', 'de', '0', '25',
+    'Holmes', 'Sherlock', 'sherLOCK', 'awyer', 'inn', 'Watson', 'Шерлок Холмс', '夏洛克', 'abc', 'de', '0', '25', 'É',
     '255.', '192.168.', '333.5.', '12:34', '555-1234', 'AB12', '123é', 'def');
 var
   Texts: array[0..59] of UTF8String;

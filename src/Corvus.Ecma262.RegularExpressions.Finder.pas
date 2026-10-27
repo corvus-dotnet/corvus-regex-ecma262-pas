@@ -240,6 +240,23 @@ begin
       Result := K;
 end;
 
+{ CapitalEnd reports whether the byte of a UTF-8 literal at K ends a character of two bytes that is a capital of the
+  alphabets Share16 counts (Latin, Greek, Cyrillic, Armenian), so that it is as rare as an ASCII capital in text: the
+  last byte of a Han character, which thousands of characters share, is not, nor is a mark such as the middle dot of
+  a Chinese name. }
+function CapitalEnd(const L: TBytes; K: NativeInt): Boolean;
+var
+  U: UInt16;
+begin
+  Result := False;
+  if (K = 0) or (L[K] < $80) or (L[K] > $BF) or (L[K - 1] < $C2) or (L[K - 1] > $DF) then
+    Exit;
+  if (K >= 2) and (L[K - 2] >= $C0) then
+    Exit;
+  U := ((L[K - 1] and $1F) shl 6) or (L[K] and $3F);
+  Result := ((U < $250) or ((U >= $370) and (U < $590))) and UcdCategory('Lu')^.Contains(U);
+end;
+
 function ShortestOf(const Literals: TByteLists): NativeInt;
 var
   K: NativeInt;
@@ -909,6 +926,34 @@ begin
             ((Rare.K2 < 0) or (Rank[Literals[0][K]] < Rank[Literals[0][Rare.K2]])) then
             Rare.K2 := K;
       Exit(Rare);
+    end;
+    // With no ASCII byte rare enough alone, where the processor has AVX2: the last byte of a capital of another
+    // alphabet (Share16), which only that capital ends, searched for alone (the Ш of Шерлок); otherwise the two
+    // rarest bytes (by Rank) tested together, as memchr's memmem does.
+    if HasAvx2 then begin
+      Rare := TRareFinder.Create;
+      Rare.Literal := Literals[0];
+      Rare.K2 := -1;
+      Best := -1;
+      for K := 0 to High(Literals[0]) do
+        if CapitalEnd(Literals[0], K) and ((Best < 0) or (Rank[Literals[0][K]] < Rank[Literals[0][Best]])) then
+          Best := K;
+      if Best >= 0 then begin
+        Rare.K := Best;
+        Exit(Rare);
+      end;
+      Best := 0;
+      for K := 1 to High(Literals[0]) do
+        if Rank[Literals[0][K]] < Rank[Literals[0][Best]] then
+          Best := K;
+      Rare.K := Best;
+      for K := 0 to High(Literals[0]) do
+        if (Literals[0][K] <> Literals[0][Best]) and
+          ((Rare.K2 < 0) or (Rank[Literals[0][K]] < Rank[Literals[0][Rare.K2]])) then
+          Rare.K2 := K;
+      if Rare.K2 >= 0 then
+        Exit(Rare);
+      Rare.Free;
     end;
     Result := BuildPairFinder(Literals, Rank);
     if Result = nil then
