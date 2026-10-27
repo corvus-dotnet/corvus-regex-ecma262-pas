@@ -9,17 +9,18 @@ the Go and Julia engines, so the numbers are the crate's. Section 5 (the source 
 port as a whole: Free Pascal cannot compile at run time, and the plan keeps a build-time generator out.
 
 The Rust crate takes its searches from `memchr` and `aho-corasick`, whose kernels are vector code. Free Pascal has
-neither and no vector intrinsics, and the plan keeps assembler out until a measured row needs it, so this port takes
-the searches of the Java, Go and Julia engines, which had the same problem: one byte by the run-time library's
-`IndexByte` (assembler on x86_64), two to four bytes and a range of bytes by SWAR (eight bytes of a `UInt64` read at a
-time and tested together, the `Swar` unit), and UTF-16 units by SWAR over four units a word. Where that does a thing
-another way, or less well than the crate, the entry says so. How each search compares with the crate's, and with
-`TRegExpr`, is for the benchmark harness of step 3 to measure.
+neither and no vector intrinsics, so the `Swar` unit writes the kernels as inline assembler for x86_64, where the
+harness measured rows that needed them: SSE2 for the searches of one to four bytes, a range or up to four ranges of
+bytes, a pair of positions and a UTF-16 unit; SSSE3 for Teddy (item 19); and AVX2, found when the program starts (with
+the system's saving of its registers), for one byte, a literal's two rarest bytes and the skip window. Every kernel has
+a fallback of SWAR (eight bytes of a `UInt64` read at a time and tested together) or a unit at a time, which another
+processor takes, and the tests pass with each fallback forced. Where this does a thing another way, or less well than
+the crate, the entry says so. The rows the harness still measures slower than V8 are listed at the end.
 
 | Count | |
 |---|---|
-| Done | 49 |
-| Not applicable | 6 |
+| Done | 50 |
+| Not applicable | 5 |
 | To do | 0 |
 
 ## Section 4.2: the program and the working memory
@@ -39,22 +40,22 @@ another way, or less well than the crate, the entry says so. How each search com
 | # | Optimisation | State | In this port |
 |---|---|---|---|
 | 8 | An anchored pattern starts only at 0 | done | `TProgram.Anchored`. |
-| 9 | A literal every match starts with, found by an anchored search | done | Over UTF-8 by its rarest byte (`TRareFinder`) or the pair search of item 52 on its two rarest positions, in place of `memmem`; over UTF-16 by its rarest unit where that is rare, or the packed search of item 45. |
-| 10 | The needle by the literal's rarest positions, compared over a vector of starts, the literal in full only where they agree | done | Another way: `TPairFinder` picks the two rarest positions by `memchr`'s table of byte frequencies and compares them at eight starts a `UInt64`, the literal in full only at a candidate. |
+| 9 | A literal every match starts with, found by an anchored search | done | Over UTF-8 by its rarest byte (`TRareFinder`, item 53) or its two rarest bytes (item 10), in place of `memmem`; over UTF-16 by its rarest unit where that is rare, or the packed search of item 45. |
+| 10 | The needle by the literal's rarest positions, compared over a vector of starts, the literal in full only where they agree | done | With AVX2, `TRareFinder` tests a literal's two bytes at sixty-four starts a step (`Eq2Block`), the literal in full only at a candidate: where its rarest byte is as common as a capital T and the literal is longer than three bytes (a second byte turns away the Ts that begin no Twain, but not those of The), and where it has no ASCII byte rare enough alone, by the two rarest by `memchr`'s table, unless the last byte of a capital of another alphabet (the Ш of Шерлок) can be searched for alone. Without AVX2, the pair search of item 52. |
 | 11 | The lazy third anchor | not applicable | As in the crate: the pair search compares two positions and then the literal. |
-| 12 | A unit rare enough alone searched for by the one-value span search | done | `TOneFinder` and `TRareFinder` (`IndexByte`); over UTF-16 `IndexUnit`. |
+| 12 | A unit rare enough alone searched for by the one-value span search | done | `TOneFinder` and `TRareFinder` (`IndexByte1`: 64 bytes a step with AVX2, else 32 with SSE2); over UTF-16 `IndexUnit` (eight units a step with SSE2). |
 | 13 | Over UTF-16, the span search, or the fingerprint search where both ends are common letters | done | Another way: the search for one literal's rarest unit, and for several the packed search of item 45. |
 | 14 | A literal at a fixed distance from the start, the start found by walking back over the characters | done | The windows of item 20, with one distance. |
 | 15 | A literal at a bounded range of distances | done | The windows of item 20. |
 | 16 | A literal after a run of disjoint unbounded loops, with a leading `\b`, the runs walked back to the earliest start | done | `pkAfterLoops` (`SearchAfterLoops`), with the crate's 0.2.1 floor. |
-| 17 | Several literals at once, by a cost model of one or two positions | done | Another way, as the Java engine: literals whose bytes at one position are up to four rare values, or a range of them, by the search for those bytes (`TFirstsFinder`); literals two of whose positions take four masked tests or fewer by the pair search; any others by `TTableFinder`, a table of the bytes at their rarest position read a byte at a time. |
+| 17 | Several literals at once, by a cost model of one or two positions | done | Another way, as the Java engine: literals whose bytes at one position are up to four rare values, or a range of them, by the search for those bytes (`TFirstsFinder`); literals two of whose positions take four masked tests or fewer by the pair search where they are one word's cases (its candidates need no compare, or each position is one test); any others by Teddy (item 19), and without SSSE3 by the pair search or `TTableFinder`, a table of the bytes at their rarest position read a byte at a time. |
 | 18 | The pairs of first characters of a sequence of classes as a multi-needle | done | Another way, as the crate: a class of up to four characters is one character of an anchor with several forms. |
-| 19 | Fingerprints (Teddy): buckets, nibble tables, up to three positions | not applicable | Teddy rests on a byte shuffle, which Free Pascal reaches only through inline assembler; the plan keeps assembler for a row that a measurement says needs it. The pair search's masked tests take what Teddy took in the crate where two positions have few values (a word's cases, a few names); a wider set goes to `TTableFinder`. |
+| 19 | Fingerprints (Teddy): buckets, nibble tables, up to three positions | done | `TeddyBlock` with SSSE3's byte shuffle: eight buckets, the literals' first three bytes (the ASCII letters folded, so a word's cases share a bucket), sixteen starts a step. Each candidate is tested against the bytes of the literals' first sixteen positions and then the literals of its first byte, from a flat list read through a pointer (`TTableFinder.LiteralAt`). Without SSSE3, `TTableFinder` reads its table a byte at a time. |
 | 20 | The literal every alternative holds, at a fixed or bounded distance, the occurrences opening windows of starts tried in order and never twice | done | `pkWindows` (`SearchWindows`), through nested alternations. |
 | 21 | The case-insensitive search: a letter's forms in one search, masks joining the forms that differ in a bit | done | The forms are written out into literals, and the pair search compares the two cases of a letter (or of a Cyrillic lead byte) with one masked test, as the reference joins them. |
 | 22 | The long s and the Kelvin sign, whose UTF-8 is longer than s and k, looked for apart | done | Another way, as the crate: they are forms like any other. Over UTF-16 the packed search takes their low bytes in the one search. |
 | 23 | The fingerprint search's positions chosen by rarity | done | Another way: the pair search and the table choose their positions by `memchr`'s table of byte frequencies. |
-| 24 | The first set found by a vectorised search for its units | done | Over UTF-8 `TFirstBytes`: one byte by `IndexByte`, two or three by SWAR, up to sixty-four by a table a byte at a time. |
+| 24 | The first set found by a vectorised search for its units | done | Over UTF-8 `TFirstBytes`: one to four bytes, a range, or up to four ranges (the ASCII runs and one run of lead bytes, each candidate then tested against the set) by SSE2 or AVX2; a set of more than four bytes (a class) tested by its table for four bytes before the vector search starts, since the next word starts a byte or two on. |
 | 25 | The same over UTF-16 | done | Another way: the first set's units as up to eight ranges merged as the crate merges them (`FirstUnitsOf`); one unit by `IndexUnit`, any other set a unit at a time through a table of bits, its blocks of bits each kept once. |
 | 26 | A failed start skips the rest of its leading loop's run | done | `TSearchPlan.SkipRun`. |
 | 27 | A start inside a word skipped where the pattern starts with `\b` and every first character is a word character | done | `TSearchPlan.LeadingWordBoundary`. |
@@ -102,10 +103,27 @@ another way, or less well than the crate, the entry says so. How each search com
 
 | # | Optimisation | State | In this port |
 |---|---|---|---|
-| 52 | A few literals found by two of their byte positions, each holding a few values, compared over a vector of starts (PCRE2's `fast_forward_char_pair_simd`) | done | `TPairFinder`: the rarest pair of positions whose values are apart, each a few masked tests (two values that differ in one bit are one test), eight starts a `UInt64`; a word's cases written out are known a literal once the bytes pass the sets of each position. It takes up to four tests a position, and one literal too. |
+| 52 | A few literals found by two of their byte positions, each holding a few values, compared over a vector of starts (PCRE2's `fast_forward_char_pair_simd`) | done | `TPairFinder`: the rarest pair of positions whose values are apart, each a few masked tests (two values that differ in one bit are one test), sixteen starts a step with SSE2 (`PairBlock`, `PairBlockN`); a word's cases written out are known a literal once the bytes pass the sets of each position. It takes up to four tests a position, and one literal too. |
 | 53 | One literal with a byte rare in text found by a search for that byte | done | `TRareFinder`, for a literal holding a capital, a digit, rare punctuation or one of `jqxzk`: of those, the byte with the least share of text (`UnitShare`, as the Java, Go and Julia engines choose), not the rarest by `memchr`'s table, which ranks Sherlock's k rarest. |
-| 54 | A window of positions read one unit at a time before the first set is searched for (V8's Boyer-Moore lookahead) | done | `SkipWindow` and `SkipAhead`, for a pattern the forward automaton reads. |
+| 54 | A window of positions read one unit at a time before the first set is searched for (V8's Boyer-Moore lookahead) | done | `SkipWindow` and `SkipAhead`, for a pattern the forward automaton reads. Over UTF-8, where the window's bytes are up to four ranges, a vector search for a run of them as long as the window (`IndexRun`, AVX2 or SSE2): a start has one of the window's bytes at each of its places, so a run that short rules out every start in it. |
 | 55 | Where every match starts with one literal, the automaton goes on after an occurrence rather than reading the literal again | done | `TAnchoredDfa.After` and `FindAfterDfa`, over UTF-8. |
+
+## The rows still slower than V8
+
+Over UTF-8, in a measured run of the harness (cores 0 to 11, the interleaved protocol), 7 of the 57 Industry
+workloads are slower than V8, each counting what V8 counts:
+
+| Workload | This port (µs) | V8 (µs) | Ratio | Where the time goes |
+|---|--:|--:|--:|---|
+| `(?:(?:25[0-5]\|2[0-4][0-9]\|[01]?[0-9][0-9])\.){3}...` | 777 | 723 | 1.08 | The run search of item 54 over the digits and dots of the text. |
+| `Шерлок Холмс` | 45.6 | 39.7 | 1.15 | The search for the Ш's last byte over 1.5 MB of Russian text, 967 places for 724 matches. |
+| `\w+` | 3,407 | 2,828 | 1.20 | 109,222 matches: each match's call from the search through the shape to the end of its run. |
+| `Sherlock\|Holmes\|Watson\|Irene\|Adler\|John\|Baker` | 280 | 231 | 1.21 | The search for the range of the capitals, each found then compared with the literals of its byte. |
+| `The` | 25.3 | 17.5 | 1.44 | The search for the T, nearly every one of which begins The. |
+| `Holmes` | 22.4 | 14.3 | 1.56 | The search for the H, whose 1,278 places in the text each end a search for 461 matches. |
+| `zqj` | 8.5 | 5.3 | 1.61 | The search for the z over 595 KB of text. |
+
+The last three are each a few microseconds; the Go engine is slower than V8 on `zqj` too.
 
 ## The stack
 
