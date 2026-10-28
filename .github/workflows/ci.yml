@@ -1,8 +1,8 @@
 # The tests, the generated tables and the ECMA-262 test data, with Free Pascal 3.2.2 (the library's floor) on Linux,
-# Windows and macOS; and on Linux, the data as its own scripts write it for Unicode 13 and 18 and for the grammar of
-# ECMAScript 2020. The data (github.com/corvus-dotnet/ecma262-regex-test-data) is pinned to a commit; the pass is 0
-# wrong answers, 0 refusals of a valid pattern, 0 acceptances of an invalid one and 0 matches at their limit, in both
-# encodings. The source is written to be Delphi-compatible, and nothing here compiles it with Delphi.
+# Windows, macOS and Linux on arm64; and on Linux, the data as its own scripts write it for Unicode 13 and 18 and for
+# the grammar of ECMAScript 2020. The data (github.com/corvus-dotnet/ecma262-regex-test-data) is pinned to a commit; the
+# pass is 0 wrong answers, 0 refusals of a valid pattern, 0 acceptances of an invalid one and 0 matches at their limit,
+# in both encodings. The source is written to be Delphi-compatible, and nothing here compiles it with Delphi.
 name: ci
 on:
   push:
@@ -22,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     defaults:
