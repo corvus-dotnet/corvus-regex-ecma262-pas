@@ -30,7 +30,7 @@ uses
 
 const
   { EcmaRegexVersion is the version of the library. }
-  EcmaRegexVersion = '0.0.0';
+  EcmaRegexVersion = '0.1.1';
 
 type
   EEcmaRegex = Corvus.Ecma262.RegularExpressions.Errors.EEcmaRegex;
