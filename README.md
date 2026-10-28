@@ -8,8 +8,14 @@ Pascal 3.2.2 and later).
   `v` flag has nested classes, the difference and the intersection of classes, strings in a class and the seven
   properties of strings.
 - ECMAScript 2025: lookbehind, named groups (and a name shared between alternatives), modifier groups such as
-  `(?i:...)`, and every Unicode property ECMA-262 lists, from tables of Unicode 17 the library carries, so a pattern
+  `(?i:...)`, and every Unicode property ECMA-262 lists, from tables of Unicode the library carries, so a pattern
   answers the same whichever compiler built it.
+- The grammar of ECMAScript 2020, which JSON Schema 2020-12 names, and a choice of Unicode version, each independent
+  of the other: a `TEcmaRegexOptions` holds an `Edition` (`ereCurrent`, the default, or `ereEs2020`) and a
+  `UnicodeVersion` (`eruDefault` for V8's version, which is 17 today, or `eru13`, `eru17`, `eru18` or `eruLatest`,
+  which is 18 today). Both are settled when a pattern is compiled and cost a match nothing. The 2020 grammar refuses
+  what later editions added: the `d` and `v` flags, modifier groups, a group name used twice, and property names
+  outside its tables. Unicode 13 and 18 are built when a pattern first asks for them.
 - Text as UTF-8 (a `UTF8String`, a `RawByteString`, bytes from a pointer, or a `TUtf8Text`, which is checked once) or
   as UTF-16 (a `UnicodeString`, or code units from a pointer, lone surrogates and all). The type of the text chooses
   the encoding, and nothing is transcoded. Text that is not UTF-8 is refused, never read as U+FFFD. One matcher serves
@@ -22,14 +28,17 @@ Pascal 3.2.2 and later).
 - A pattern without a backreference is matched in time proportional to its size times the text. A pattern can be given
   a match timeout, as a `Regex` of .NET can, which bounds the time and the backtracking memory of every match. With a
   timeout and the library's limits of pattern size, neither a pattern nor a text from outside can make a program hang.
-  `SetDefaultEcmaRegexMatchTimeout` gives every pattern one.
+  `SetDefaultEcmaRegexMatchTimeout` gives every pattern one. `TryCompileEcmaRegex(Pattern, Flags, Options, Regex,
+  Error)` gives a pattern its own in `Options` and returns false with a `TEcmaRegexError` (its kind and message) in
+  place of raising, so a validator needs neither the default nor a `try`.
 - Every array read is checked. Range checking is on in every unit.
 - No dependencies beyond the compiler's run-time library.
 
 **Compliance.** Over the [ECMA-262 test data](https://github.com/corvus-dotnet/ecma262-regex-test-data) (what V8 says
 about its patterns and texts, test262's patterns and `exec` calls, the global search, `replace` and `split` among them,
 and texts of bytes that are not UTF-8, which it refuses), the library gives every answer right and none wrong, refuses
-no valid pattern, accepts no invalid one and reaches no limit, over UTF-8 and over UTF-16. CI runs the whole data on
+no valid pattern, accepts no invalid one and reaches no limit, over UTF-8 and over UTF-16. It does the same on the data
+as the data's own scripts write it for Unicode 13 and 18 and for the grammar of ECMAScript 2020. CI runs all of it on
 every change.
 
 It is a port of the Rust crate [corvus-regex-ecma262](https://github.com/corvus-dotnet/corvus-regex-ecma262-rs), and it
@@ -47,6 +56,8 @@ var
   C: TEcmaCaptures;
   Text: TUtf8Text;
   Index, Len: NativeInt;
+  Options: TEcmaRegexOptions;
+  Error: TEcmaRegexError;
 begin
   Re := CompileEcmaRegex('(?<year>\d{4})-(?<month>\d{2})', 'u');
   Re.IsMatch(UTF8String('on 2026-10-25'));                              // True
@@ -63,6 +74,14 @@ begin
   // Over UTF-16, in code units.
   for W in CompileEcmaRegex('\p{Lu}', 'u').Matches(UnicodeString('Ab Cd')) do
     WriteLn(W.Index);                                                  // 1, then 4
+
+  // ECMAScript 2020 as its edition was published, with the Unicode of its year, and a match timeout of its own.
+  Options := TEcmaRegexOptions.Default;
+  Options.MatchTimeout := 1;
+  Options.Edition := ereEs2020;
+  Options.UnicodeVersion := eru13;
+  if not TryCompileEcmaRegex('^\p{Script=Greek}+$', 'u', Options, Re, Error) then
+    WriteLn(Error.Message);
 end;
 ```
 
@@ -115,9 +134,10 @@ bin/run <ecma262-regex-test-data>/data wrong-cases.tsv --threads 4
 ```
 
 `CORVUS_REGEX_MEMO_FROM_THE_START=1` makes every match take its memory of failed places from its first step, which CI
-does for a second run of both. The Unicode tables (`src/Corvus.Ecma262.RegularExpressions.UcdTables.inc` and
-`src/Corvus.Ecma262.RegularExpressions.StringsTables.inc`) are written from the Rust crate's by `tools/unicode`, and CI
-checks they are current.
+does for a second run of both. The Unicode tables of each version (the units
+`src/Corvus.Ecma262.RegularExpressions.Ucd<major>.pas`, with `src/Corvus.Ecma262.RegularExpressions.Strings<major>.inc`)
+and the property names of ECMAScript 2020 (`src/Corvus.Ecma262.RegularExpressions.Es2020.pas`) are written from the
+Rust crate's by `tools/unicode`, and CI checks them against the crate.
 
 ## Releasing
 

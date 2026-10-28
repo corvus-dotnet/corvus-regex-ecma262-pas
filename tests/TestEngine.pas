@@ -9,7 +9,7 @@ program TestEngine;
 
 uses
   {$IFDEF UNIX}cthreads,{$ENDIF}
-  SysUtils,
+  Classes, SysUtils,
   Corvus.Ecma262.RegularExpressions;
 
 var
@@ -288,6 +288,174 @@ begin
   Check(CompileEcmaRegex('a').MatchTimeout = 0, 'no default timeout');
 end;
 
+type
+  { A TFirstUse thread compiles and matches patterns of Unicode 13 and 18, which are made on their first use. }
+  TFirstUse = class(TThread)
+  protected
+    procedure Execute; override;
+  public
+    Wrong: Int32;
+  end;
+
+procedure TFirstUse.Execute;
+const
+  Yezidi = #$F0#$90#$BA#$80;
+  Jurchen = #$F0#$98#$B8#$80;
+var
+  Options: TEcmaRegexOptions;
+  K: Int32;
+begin
+  Wrong := 0;
+  Options := TEcmaRegexOptions.Default;
+  for K := 1 to 20 do
+    try
+      Options.UnicodeVersion := eru13;
+      if not CompileEcmaRegex('^\p{Script=Yezidi}\p{Lu}$', 'u', Options).IsMatch(Yezidi + 'A') then
+        Inc(Wrong);
+      Options.UnicodeVersion := eru18;
+      if not CompileEcmaRegex('^\p{scx=Jurc}$', 'iu', Options).IsMatch(Jurchen) then
+        Inc(Wrong);
+    except
+      Inc(Wrong);
+    end;
+end;
+
+{ TestFirstUse makes Unicode 13 and 18 from eight threads at once, before any other test makes them: two threads must
+  not fill one version together. }
+procedure TestFirstUse;
+var
+  Threads: array[0..7] of TFirstUse;
+  K, Wrong: Int32;
+begin
+  for K := 0 to High(Threads) do
+    Threads[K] := TFirstUse.Create(True);
+  for K := 0 to High(Threads) do
+    Threads[K].Start;
+  Wrong := 0;
+  for K := 0 to High(Threads) do begin
+    Threads[K].WaitFor;
+    Inc(Wrong, Threads[K].Wrong);
+    Threads[K].Free;
+  end;
+  Check(Wrong = 0, 'Unicode 13 and 18 made from eight threads at once give their answers (' + IntToStr(Wrong) +
+    ' wrong)');
+end;
+
+{ The edition of the grammar and the version of Unicode (tests/editions.rs of the Rust crate): ECMAScript 2020
+  refuses what later editions added and nothing else, and each version of Unicode has its own scripts and case
+  folding, in the matcher as in the parser. U+10570 and U+10597 are a capital and a small letter of Vithkuqi, a
+  script of Unicode 14; U+A7C0 and U+A7C1 are the capital and the small Old Polish O, also of Unicode 14. }
+procedure TestEditions;
+const
+  VithkuqiCapital = #$F0#$90#$95#$B0;
+  VithkuqiSmall = #$F0#$90#$96#$97;
+  OldPolishCapital = #$EA#$9F#$80;
+  OldPolishSmall = #$EA#$9F#$81;
+  Versions: array[0..4] of TEcmaRegexUnicodeVersion = (eruDefault, eru13, eru17, eru18, eruLatest);
+  Resolved: array[0..4] of Int32 = (17, 13, 17, 18, 18);
+  Refused2020: array[0..7, 0..1] of UTF8String = (('(?i:a)', ''), ('(?-i:a)', 'i'), ('(?s:.)', 'u'),
+    ('(?<a>x)|(?<a>y)', ''), ('(?<a>x)|(?<a>y)', 'u'), ('\p{Script=Yezidi}', 'u'), ('\p{sc=Vith}', 'u'),
+    ('\p{Script_Extensions=Toto}', 'u'));
+  Accepted2020: array[0..6, 0..1] of UTF8String = (('\p{Script=Greek}', 'u'), ('\p{L}\p{gc=Lu}\p{Lowercase}', 'u'),
+    ('\P{scx=Latn}', 'iu'), ('\p{Script=Yezidi}', ''), ('(?<a>x)(?<b>y)\k<a>', 'u'), ('(?<=a)(?<!b)', 's'),
+    ('(?:i)', ''));
+  Backrefs: array[0..2] of UTF8String = ('(.)\1', '(?<=\1(.))', '(?:x|(.))+\1$');
+var
+  Re: IEcmaRegex;
+  Err: TEcmaRegexError;
+  K, P: Int32;
+  Text, First, Twice: UTF8String;
+  Flags: string;
+
+  function Opts(Edition: TEcmaRegexEdition; Version: TEcmaRegexUnicodeVersion): TEcmaRegexOptions;
+  begin
+    Result := TEcmaRegexOptions.Default;
+    Result.Edition := Edition;
+    Result.UnicodeVersion := Version;
+  end;
+
+  function Under(const Pattern: UTF8String; const F: string; Version: TEcmaRegexUnicodeVersion): IEcmaRegex;
+  begin
+    Result := CompileEcmaRegex(Pattern, F, Opts(ereCurrent, Version));
+  end;
+
+begin
+  Err := Default(TEcmaRegexError);
+  Re := CompileEcmaRegex('a');
+  Check((Re.Edition = ereCurrent) and (Re.UnicodeVersion = 17), 'the defaults are today''s grammar and V8''s Unicode');
+  for K := 0 to High(Versions) do
+    Check(Under('a', '', Versions[K]).UnicodeVersion = Resolved[K], 'a version is resolved when compiled');
+
+  Check(not IsValidEcmaRegex('\p{Script=Vithkuqi}', 'u', Opts(ereCurrent, eru13)), 'no Vithkuqi in Unicode 13');
+  Check(IsValidEcmaRegex('\p{Script=Vithkuqi}', 'u', Opts(ereCurrent, eruDefault)), 'Vithkuqi in Unicode 17');
+  Check(IsValidEcmaRegex('\p{Script=Yezidi}', 'u', Opts(ereCurrent, eru13)), 'Yezidi in Unicode 13');
+  Check(not IsValidEcmaRegex('\p{Script=Jurchen}', 'u', Opts(ereCurrent, eruDefault)), 'no Jurchen in Unicode 17');
+  Check(IsValidEcmaRegex('\p{scx=Jurc}', 'u', Opts(ereCurrent, eru18)), 'Jurchen in Unicode 18');
+  Check(IsValidEcmaRegex('\p{Script=Jurchen}', 'u', Opts(ereCurrent, eruLatest)), 'Jurchen in the latest');
+
+  // The same expression under two versions, in both orders: the property sets are each version's.
+  for K := 1 to 2 do begin
+    Check(Under('^\p{Ll}$', 'u', eru17).IsMatch(VithkuqiSmall), '\p{Ll} under 17');
+    Check(not Under('^\p{Ll}$', 'u', eru13).IsMatch(VithkuqiSmall), '\p{Ll} under 13');
+  end;
+
+  Check(Under('\u{10570}', 'iu', eru17).IsMatch(VithkuqiSmall), 'a literal folds as 17 folds');
+  Check(not Under('\u{10570}', 'iu', eru13).IsMatch(VithkuqiSmall), 'a literal folds as 13 folds');
+  Check(Under(OldPolishCapital, 'i', eru17).IsMatch(OldPolishSmall), 'Old Polish O folds in 17 without u');
+  Check(not Under(OldPolishCapital, 'i', eru13).IsMatch(OldPolishSmall), 'Old Polish O does not fold in 13');
+
+  for K := 0 to 1 do begin
+    if K = 0 then begin
+      Flags := 'iu';
+      Text := VithkuqiCapital + VithkuqiSmall;
+      First := VithkuqiCapital;
+    end else begin
+      Flags := 'i';
+      Text := OldPolishCapital + OldPolishSmall;
+      First := OldPolishCapital;
+    end;
+    Twice := First + First;
+    for P := 0 to High(Backrefs) do begin
+      Check(Under(Backrefs[P], Flags, eru17).IsMatch(Text), Backrefs[P] + ' folds under 17');
+      Check(Under(Backrefs[P], Flags, eru18).IsMatch(UTF8Decode(Text)), Backrefs[P] + ' folds over UTF-16 under 18');
+      Re := Under(Backrefs[P], Flags, eru13);
+      Check(not Re.IsMatch(Text), Backrefs[P] + ' does not fold under 13');
+      Check(not Re.IsMatch(UTF8Decode(Text)), Backrefs[P] + ' does not fold over UTF-16 under 13');
+      Check(Re.IsMatch(Twice), Backrefs[P] + ' matches the same letter twice under 13');
+      // The program that records every group folds as the one that finds the match.
+      Check(Re.Match(Twice).Success, Backrefs[P] + ' captures under 13');
+      Check(not Re.Match(Text).Success, Backrefs[P] + ' captures nothing under 13');
+    end;
+  end;
+
+  for K := 0 to High(Refused2020) do begin
+    Check(not TryCompileEcmaRegex(Refused2020[K, 0], string(Refused2020[K, 1]), Opts(ereEs2020, eruLatest), Re, Err) and
+      (Err.Kind = eekSyntax) and (Re = nil), Refused2020[K, 0] + ' is refused in 2020');
+    Check(TryCompileEcmaRegex(Refused2020[K, 0], string(Refused2020[K, 1]), Opts(ereCurrent, eruLatest), Re, Err) and
+      (Err.Kind = eekNone) and (Re <> nil), Refused2020[K, 0] + ' is accepted today');
+  end;
+  for K := 0 to High(Accepted2020) do
+    Check(TryCompileEcmaRegex(Accepted2020[K, 0], string(Accepted2020[K, 1]), Opts(ereEs2020, eru13), Re, Err),
+      Accepted2020[K, 0] + ' is accepted in 2020');
+  Check(not TryCompileEcmaRegex('a', 'd', Opts(ereEs2020, eruDefault), Re, Err) and (Err.Kind = eekFlags),
+    'no d flag in 2020');
+  Check(not TryCompileEcmaRegex('a', 'v', Opts(ereEs2020, eruDefault), Re, Err) and (Err.Kind = eekFlags),
+    'no v flag in 2020');
+  Check(not IsValidEcmaRegex('a', 'v', Opts(ereEs2020, eruDefault)), 'IsValidEcmaRegex: no v flag in 2020');
+  Check(TryCompileEcmaRegex('a', 'v', Opts(ereCurrent, eruDefault), Re, Err), 'the v flag today');
+
+  // TryCompileEcmaRegex takes a match timeout of its own and raises nothing for the pattern.
+  Check(TryCompileEcmaRegex('a+', 'u', Opts(ereCurrent, eruDefault), Re, Err), 'a valid pattern');
+  Check(Abs(Re.MatchTimeout - DefaultEcmaRegexMatchTimeout) < 1E-9, 'the default timeout without one');
+  Err.Kind := eekNone;
+  Check(not TryCompileEcmaRegex('(', 'u', Opts(ereCurrent, eruDefault), Re, Err) and (Err.Kind = eekSyntax) and
+    (Err.Message <> ''), 'an invalid pattern gives its error');
+  Check(not TryCompileEcmaRegex('a', 'x', Opts(ereCurrent, eruDefault), Re, Err) and (Err.Kind = eekFlags),
+    'invalid flags give their error');
+  Check(not TryCompileEcmaRegex(#$61#$FF, '', Opts(ereCurrent, eruDefault), Re, Err) and (Err.Kind = eekEncoding),
+    'a pattern that is not UTF-8 gives its error');
+end;
+
 procedure TestLinear;
 var
   Text: UTF8String;
@@ -327,6 +495,7 @@ begin
 end;
 
 begin
+  TestFirstUse;
   TestFlags;
   TestCompileErrors;
   TestMatch;
@@ -339,6 +508,7 @@ begin
   TestUtf16;
   TestHalfCharacter;
   TestTimeout;
+  TestEditions;
   TestLinear;
   TestCaptures;
   WriteLn(Format('%d checks, %d failed', [Checks, Failures]));

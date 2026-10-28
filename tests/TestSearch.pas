@@ -52,6 +52,7 @@ var
   F: TEcmaRegexFlags;
 begin
   F := ParseEcmaRegexFlags(Flags);
+  Result := Default(TSyntax);
   Result.Unicode := (erfUnicode in F) or (erfUnicodeSets in F);
   Result.Sets := erfUnicodeSets in F;
   Result.ICase := erfIgnoreCase in F;

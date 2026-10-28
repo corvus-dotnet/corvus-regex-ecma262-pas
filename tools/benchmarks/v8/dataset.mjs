@@ -4,7 +4,7 @@
 // captures.jsonl is judged on exec, the global search, the sticky flag, replace, replaceAll, split and split3, each
 // one answer, as the Rust runner judges an engine over UTF-16. exec/test262.jsonl, the exec calls of test262, is
 // judged last: each call one exec with the record's flags from its lastIndex, one answer. With the Node the data was
-// written with (24.22.0),
+// written with (24.22.1),
 // every answer is V8's own, so this is the check that the data and the V8 on the page agree; with another, a
 // difference is a place where its V8 differs.
 //

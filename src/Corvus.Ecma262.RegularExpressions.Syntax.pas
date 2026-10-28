@@ -71,6 +71,8 @@ type
     Name: TRunes;
     { Marks an nkBackref, nkWordBoundary or nkNotWordBoundary inside a case-insensitive group. }
     Fold: Boolean;
+    { The major number of the version of Unicode whose case folding an nkBackref matches with. }
+    FoldVersion: Int32;
     { Behind and Negative describe an nkLook. }
     Behind: Boolean;
     Negative: Boolean;
@@ -103,13 +105,18 @@ type
   { A TSyntax is the grammar a pattern is read with and the flags that change what its atoms mean. Unicode is the
     grammar of the u flag (without it, the Annex B grammar of a pattern with no u or v flag); Sets is the grammar of
     the v flag inside a class, and the properties of strings, and comes with Unicode; ICase, Multiline and DotAll are
-    the i, m and s flags: the modifiers in force at the start of the pattern. }
+    the i, m and s flags: the modifiers in force at the start of the pattern. Es2020 is the grammar of ECMAScript 2020,
+    which refuses what later editions added, and UnicodeVersion the major number of the version of Unicode whose tables
+    the pattern is read with (13, 17 or 18; 0 for the default). Default(TSyntax) is today's grammar with no flag and
+    the default version. }
   TSyntax = record
     Unicode: Boolean;
     Sets: Boolean;
     ICase: Boolean;
     Multiline: Boolean;
     DotAll: Boolean;
+    Es2020: Boolean;
+    UnicodeVersion: Int32;
   end;
 
   { A TParsed is what reading a pattern gives: its tree, the number of its capturing groups, their names, and whether
@@ -144,6 +151,9 @@ function HighSurrogate(C: Int32): Int32; inline;
 function LowSurrogate(C: Int32): Int32; inline;
 
 implementation
+
+uses
+  Corvus.Ecma262.RegularExpressions.Es2020;
 
 type
   { A TBranch names one alternative of one disjunction. }
@@ -185,6 +195,11 @@ type
     Unicode: Boolean;
     { The grammar of the v flag. }
     Sets: Boolean;
+    { The Unicode of the version the pattern is read with, and the tables a group name is read with in it. }
+    Ucd: TUcd;
+    IdStart, IdContinue: PUcdTable;
+    { The grammar of ECMAScript 2020, which refuses what later editions added. }
+    Es2020: Boolean;
     { The sequences of the property of strings the last class escape named (the v flag), when HasEscapeStrings. }
     EscapeStrings: TRuneLists;
     HasEscapeStrings: Boolean;
@@ -259,9 +274,6 @@ type
     function ClassNodeOf(const Value: TClassSetValue; Negated: Boolean): TNode;
   end;
 
-var
-  IdStart, IdContinue: PUcdTable;
-
 { TNodeArena }
 
 destructor TNodeArena.Destroy;
@@ -330,6 +342,7 @@ begin
   Result.Groups := Copy(N.Groups);
   Result.Name := Copy(N.Name);
   Result.Fold := N.Fold;
+  Result.FoldVersion := N.FoldVersion;
   Result.Behind := N.Behind;
   Result.Negative := N.Negative;
 end;
@@ -905,7 +918,7 @@ var
   Variants: Int32;
 begin
   if ICase then begin
-    CharSet := FoldClosure(NewCharSet([C, C]), Unicode, Variants);
+    CharSet := FoldClosure(Ucd, NewCharSet([C, C]), Unicode, Variants);
     if (Length(CharSet.Ranges) <> 2) or (CharSet.Ranges[0] <> CharSet.Ranges[1]) then
       Exit(Arena.SetNode(CharSet));
   end;
@@ -928,7 +941,7 @@ function TParser.FoldSet(const CharSet: TCharSet): TCharSet;
 var
   Variants: Int32;
 begin
-  Result := FoldClosure(CharSet, Unicode, Variants);
+  Result := FoldClosure(Ucd, CharSet, Unicode, Variants);
   Charge(Int64(Variants) + Int64(RangeSize) * (Length(Result.Ranges) div 2));
 end;
 
@@ -1112,7 +1125,8 @@ begin
     Exit(Arena.WithSubs(nkGroup, [Body]));
   end;
   C := Peek;
-  if Isc(C, 'i') or Isc(C, 'm') or Isc(C, 's') or Isc(C, '-') then
+  // Modifier groups came in ECMAScript 2025, so the 2020 grammar reads (?i as an invalid group.
+  if (Isc(C, 'i') or Isc(C, 'm') or Isc(C, 's') or Isc(C, '-')) and not Es2020 then
     Exit(ModifierGroup);
   if Eat('=') or Eat('!') then begin
     Negative := Isc(At(I - 1), '!');
@@ -1139,8 +1153,10 @@ begin
     end;
     Name := GroupName;
     // Two groups may share a name only when they are in separate alternatives of one disjunction, so that no match
-    // can go through both.
+    // can go through both. The 2020 grammar refuses a name used twice, wherever the groups are.
     E := FindName(Name);
+    if (E >= 0) and Es2020 then
+      Fail('duplicate group name');
     if E >= 0 then
       for C := 0 to High(Names[E].Groups) do
         if not SeparateAlternatives(Names[E].Groups[C].Path, Path, PathLen) then
@@ -1308,6 +1324,7 @@ begin
       Result := Arena.Node(nkBackref);
       Result.Name := Name;
       Result.Fold := ICase;
+      Result.FoldVersion := Ucd.Major;
       Exit;
     end;
     Inc(I);
@@ -1322,6 +1339,7 @@ begin
       SetLength(Result.Groups, 1);
       Result.Groups[0] := N;
       Result.Fold := ICase;
+      Result.FoldVersion := Ucd.Major;
       Exit;
     end;
     if Unicode then
@@ -1402,9 +1420,10 @@ begin
     Expr := RunesText(P, Start, I - Start);
     if not Eat('}') then
       Fail('invalid property name');
-    if not PropertySet(Expr, Found) then begin
+    // The 2020 grammar knows only the names and values of its own tables, whatever the version of Unicode.
+    if (Es2020 and not Es2020HasProperty(Expr)) or not PropertySet(Ucd, Expr, Found) then begin
       if Sets and Isc(C, 'p') then begin
-        Prop := StringPropertyOf(Expr);
+        Prop := StringPropertyOf(Ucd, Expr);
         if Prop <> nil then begin
           // A property of strings, which the v flag alone names, and which has no complement.
           Charge(Int64(RangeSize) * (Length(Prop^.CharSet.Ranges) div 2 + Length(Prop^.Strings)));
@@ -1891,7 +1910,7 @@ begin
     Exit(CodePoints);
   SetLength(Result, Length(CodePoints));
   for K := 0 to High(CodePoints) do
-    Result[K] := Canonicalize(CodePoints[K], True);
+    Result[K] := Canonicalize(Ucd, CodePoints[K], True);
 end;
 
 { ClassNodeOf is the node of a class of the v flag's grammar: its set, or, where it holds strings, the alternatives of
@@ -1960,6 +1979,10 @@ begin
       Ps.P := CodeUnits(Runes);
     Ps.Unicode := Sx.Unicode;
     Ps.Sets := Sx.Sets;
+    Ps.Ucd := UcdByMajor(Sx.UnicodeVersion);
+    Ps.IdStart := MustBinaryTable(Ps.Ucd, 'ID_Start');
+    Ps.IdContinue := MustBinaryTable(Ps.Ucd, 'ID_Continue');
+    Ps.Es2020 := Sx.Es2020;
     Ps.ICase := Sx.ICase;
     Ps.Multiline := Sx.Multiline;
     Ps.DotAll := Sx.DotAll;
@@ -1981,7 +2004,4 @@ begin
   end;
 end;
 
-initialization
-  IdStart := MustBinaryTable('ID_Start');
-  IdContinue := MustBinaryTable('ID_Continue');
 end.
