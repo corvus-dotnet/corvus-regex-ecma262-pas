@@ -5,6 +5,7 @@ program run;
   as the runner of the Rust crate does (tools/src/bin/dataset.rs there), with the same judging rules.
 
     run <data directory> <wrong-cases output file> [file filter] [utf16|utf8|both] [--threads N] [--compliance <file>]
+      [--edition current|es2020] [--unicode 13|17|18|latest]
 
   Each record is asked about under each grammar V8 found it valid in: the record's flags with u added (the unicode
   answers), the record's flags alone (the legacy answers) and, in the file that has them, the flags with v added (the
@@ -18,6 +19,9 @@ program run;
   the record's flags from its lastIndex, right when the positions of the match and of every group, the named groups
   and, with g or y, the lastIndex after are V8's; one answer over UTF-16 and, when the text holds no lone surrogate
   and lastIndex is not between the halves of a pair, one over UTF-8 with positions in bytes.
+
+  With --edition and --unicode the engine reads every pattern with that edition's grammar and that version's tables,
+  and the data is the data as node edition.js apply or node unicode.js apply writes it for them.
 
   With --compliance <file>, the engine's compliance object is written to the file, as the benchmark page reads it
   (docs/implementing-a-source.md in corvus-regex-ecma262-benchmarks): the counts, this runner and the calls it makes
@@ -282,6 +286,11 @@ begin
   Result := (J <> nil) and (J.Kind = jBool) and J.B;
 end;
 
+function IsFalse(J: TJson): Boolean;
+begin
+  Result := (J <> nil) and (J.Kind = jBool) and not J.B;
+end;
+
 { Text }
 
 function HasLoneSurrogate(const S: UnicodeString): Boolean;
@@ -406,9 +415,14 @@ begin
   Result[Length(S)] := B;
 end;
 
+var
+  { The edition and the version of Unicode the engine reads every pattern with (--edition, --unicode), with the limit
+    of each answer. }
+  Settings: TEcmaRegexOptions;
+
 function Compile(const Pattern: UTF8String; const Flags: string): IEcmaRegex;
 begin
-  Result := CompileEcmaRegex(Pattern, Flags, Limit);
+  Result := CompileEcmaRegex(Pattern, Flags, Settings);
 end;
 
 function LimitKind(E: Exception): string;
@@ -545,6 +559,9 @@ begin
           Msg := 'PARSE: ' + E.Message
         else if E is EEcmaRegexTooLarge then
           Msg := 'TOO-LARGE: ' + E.Message
+        else if E is EEcmaRegexFlags then
+          // The flags of a grammar the edition does not have (the v flag of ECMAScript 2020): a refusal.
+          Msg := 'FLAGS: ' + E.Message
         else begin
           Inc(C.Errors);
           Msg := 'ERROR: ' + E.Message;
@@ -850,6 +867,17 @@ begin
   Tests := R.Get('tests');
   if Tests = nil then
     Exit;
+  // A grammar the data finds the pattern not valid in, as an overlay may, must be refused here too.
+  for MI := 0 to 1 do begin
+    if MI = 0 then
+      ModeFlags := Flags + 'u'
+    else
+      ModeFlags := Flags;
+    if IsFalse(Valid.Get(ModeNames[MI])) and (Make(ModeFlags) <> nil) then begin
+      Inc(C.Accepted);
+      Wrong.Add('ACCEPTED-INVALID' + #9 + 'captures.jsonl' + #9 + '/' + Shown + '/' + ModeFlags);
+    end;
+  end;
   for MI := 0 to 1 do begin
     if not IsTrue(Valid.Get(ModeNames[MI])) then
       Continue;
@@ -1258,6 +1286,36 @@ begin
     Args.Delete(K + 1);
     Args.Delete(K);
   end;
+  Settings := TEcmaRegexOptions.Default;
+  Settings.MatchTimeout := Limit;
+  K := Args.IndexOf('--edition');
+  if K >= 0 then begin
+    if Args[K + 1] = 'es2020' then
+      Settings.Edition := ereEs2020
+    else if Args[K + 1] <> 'current' then begin
+      WriteLn(StdErr, 'the edition is current or es2020, not ', Args[K + 1]);
+      Halt(2);
+    end;
+    Args.Delete(K + 1);
+    Args.Delete(K);
+  end;
+  K := Args.IndexOf('--unicode');
+  if K >= 0 then begin
+    if (Args[K + 1] = '13') or (Args[K + 1] = '13.0') then
+      Settings.UnicodeVersion := eru13
+    else if (Args[K + 1] = '17') or (Args[K + 1] = '17.0') then
+      Settings.UnicodeVersion := eru17
+    else if (Args[K + 1] = '18') or (Args[K + 1] = '18.0') then
+      Settings.UnicodeVersion := eru18
+    else if Args[K + 1] = 'latest' then
+      Settings.UnicodeVersion := eruLatest
+    else begin
+      WriteLn(StdErr, 'the Unicode version is 13, 17, 18 or latest, not ', Args[K + 1]);
+      Halt(2);
+    end;
+    Args.Delete(K + 1);
+    Args.Delete(K);
+  end;
   Threads := 4;
   K := Args.IndexOf('--threads');
   if K >= 0 then begin
@@ -1267,7 +1325,7 @@ begin
   end;
   if Args.Count < 2 then begin
     WriteLn(StdErr, 'usage: run <data directory> <wrong-cases output file> [file filter] [utf16|utf8|both] ' +
-      '[--threads N] [--compliance <file>]');
+      '[--threads N] [--compliance <file>] [--edition current|es2020] [--unicode 13|17|18|latest]');
     Halt(2);
   end;
   Directory := Args[0];

@@ -567,7 +567,7 @@ begin
           Got := ReadAt(T, At, Units, W2);
           Inc(At, W2);
           Ok := (Got = Want) or ((I^.Op = opBackrefFold) and
-            (Canonicalize(Got, I^.Flag) = Canonicalize(Want, I^.Flag)));
+            EqualIgnoringCase(I^.B, Got, Want, I^.Flag));
         end;
         if Ok then begin
           Pos := At;
@@ -596,7 +596,7 @@ begin
           Got := ReadLast(T, At, Units, W2);
           Dec(At, W2);
           Ok := (Got = Want) or ((I^.Op = opBackrefFoldBack) and
-            (Canonicalize(Got, I^.Flag) = Canonicalize(Want, I^.Flag)));
+            EqualIgnoringCase(I^.B, Got, Want, I^.Flag));
         end;
         if Ok then begin
           Pos := At;

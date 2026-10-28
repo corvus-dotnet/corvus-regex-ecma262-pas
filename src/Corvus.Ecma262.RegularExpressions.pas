@@ -14,6 +14,10 @@ unit Corvus.Ecma262.RegularExpressions;
   UnicodeString, and a string literal, is matched as UTF-16, and the positions are 1-based indexes of its code units.
   A match of UTF-8 text is a TEcmaMatch and of UTF-16 text a TEcmaMatchW.
 
+  A TEcmaRegexOptions reads a pattern with the grammar of ECMAScript 2020 (ereEs2020), the grammar JSON Schema 2020-12
+  names, and with the tables of Unicode 13, 17 or 18 (TEcmaRegexUnicodeVersion), each chosen on its own. Both are read
+  when the pattern is compiled, so a match costs the same whichever is chosen.
+
   The engine is a port of the Rust crate corvus-regex-ecma262, unit for unit (the Syntax unit is parse.rs, the Prog
   unit is compile.rs, and so on), held to the same ECMA-262 test data. *)
 
@@ -42,6 +46,42 @@ type
   TEcmaRegexFlag = (erfHasIndices, erfGlobal, erfIgnoreCase, erfMultiline, erfDotAll, erfUnicode, erfUnicodeSets,
     erfSticky);
   TEcmaRegexFlags = set of TEcmaRegexFlag;
+
+  { The edition of ECMA-262 whose grammar a pattern is read with. ereCurrent is today's grammar, ECMAScript 2025, the
+    default. ereEs2020 is the grammar of ECMAScript 2020 (ECMA-262, 11th edition), which JSON Schema 2020-12 names: it
+    refuses what later editions added, and nothing else, the d and v flags, modifier groups such as (?i:...), a group
+    name used by two groups, and a property name or value that is not in the edition's tables. A pattern it accepts
+    has the same answers as in today's grammar, under the same version of Unicode. }
+  TEcmaRegexEdition = (ereCurrent, ereEs2020);
+
+  (* The version of Unicode whose character database a pattern is read with: the members of each \p{...}, the
+    characters of a group name, and the case folding of the i flag. It is independent of the edition. eruDefault is
+    the version of the V8 the answers are held to, Unicode 17 today, which moves when that V8 moves; eru13 is Unicode
+    13.0, the version of the year of ECMAScript 2020; eru17 and eru18 are Unicode 17.0 and 18.0; eruLatest is the
+    latest version the library carries, Unicode 18 today, which moves when a later version is added. *)
+  TEcmaRegexUnicodeVersion = (eruDefault, eru13, eru17, eru18, eruLatest);
+
+  { A TEcmaRegexOptions is how a pattern is compiled besides its flags: its match timeout in seconds (below 0 for the
+    default, see SetDefaultEcmaRegexMatchTimeout, and 0 for none), the edition whose grammar it is read with and the
+    version of Unicode whose tables it is read with. Default gives the default timeout, today's grammar and V8's
+    Unicode. }
+  TEcmaRegexOptions = record
+    MatchTimeout: Double;
+    Edition: TEcmaRegexEdition;
+    UnicodeVersion: TEcmaRegexUnicodeVersion;
+    class function Default: TEcmaRegexOptions; static;
+  end;
+
+  { Why TryCompileEcmaRegex did not compile a pattern: eekSyntax for a pattern that is not valid, eekFlags for flags
+    that are not valid (or that the edition does not have), eekTooLarge for a pattern over a limit of size, eekEncoding
+    for a pattern that is not UTF-8. }
+  TEcmaRegexErrorKind = (eekNone, eekSyntax, eekFlags, eekTooLarge, eekEncoding);
+
+  { A TEcmaRegexError is the kind and the message of the error TryCompileEcmaRegex gives in place of raising it. }
+  TEcmaRegexError = record
+    Kind: TEcmaRegexErrorKind;
+    Message: string;
+  end;
 
   { A TUtf8Text is UTF-8 text that has been checked once, so that the calls that take it check nothing. A program
     that matches one text many times makes a TUtf8Text of it and pays for the check once. }
@@ -181,6 +221,8 @@ type
     function GetFlagsText: string;
     function GetGroupCount: Int32;
     function GetMatchTimeout: Double;
+    function GetEdition: TEcmaRegexEdition;
+    function GetUnicodeVersion: Int32;
 
     function IsMatch(const Text: UTF8String; StartIndex: NativeInt = 1): Boolean; overload;
     function IsMatch(const Text: UnicodeString; StartIndex: NativeInt = 1): Boolean; overload;
@@ -228,6 +270,11 @@ type
     property GroupCount: Int32 read GetGroupCount;
     { MatchTimeout is the time each match may take in seconds, or 0 for no limit. }
     property MatchTimeout: Double read GetMatchTimeout;
+    { Edition is the edition of ECMA-262 whose grammar the pattern was read with. }
+    property Edition: TEcmaRegexEdition read GetEdition;
+    { UnicodeVersion is the major number of the version of Unicode whose tables the pattern was read with, resolved:
+      13, 17 or 18. }
+    property UnicodeVersion: Int32 read GetUnicodeVersion;
   end;
 
 { ParseEcmaRegexFlags reads flags written as new RegExp reads them, such as 'giu'. A flag that is not one of
@@ -257,8 +304,26 @@ function CompileEcmaRegex(const Pattern: UnicodeString; const Flags: string = ''
 function CompileEcmaRegex(const Pattern: UTF8String; Flags: TEcmaRegexFlags;
   MatchTimeout: Double = -1): IEcmaRegex; overload;
 
-{ IsValidEcmaRegex reports whether a pattern is valid with the flags. }
-function IsValidEcmaRegex(const Pattern: UTF8String; const Flags: string = ''): Boolean;
+{ CompileEcmaRegex with Options compiles a pattern with the settings besides its flags (see TEcmaRegexOptions). Under
+  ereEs2020 the d and v flags raise EEcmaRegexFlags. }
+function CompileEcmaRegex(const Pattern: UTF8String; const Flags: string;
+  const Options: TEcmaRegexOptions): IEcmaRegex; overload;
+
+{ TryCompileEcmaRegex is CompileEcmaRegex with Options that gives its error in place of raising it: it returns true
+  with the pattern in Regex, or false with why in Error. A validator that compiles patterns from outside takes this
+  form, and gives each a match timeout of its own in Options. }
+function TryCompileEcmaRegex(const Pattern: UTF8String; const Flags: string; const Options: TEcmaRegexOptions;
+  out Regex: IEcmaRegex; out Error: TEcmaRegexError): Boolean;
+
+{ IsValidEcmaRegex reports whether a pattern is valid with the flags, and with Options, in the grammar of its edition
+  and under its version of Unicode (the match timeout is not read). }
+function IsValidEcmaRegex(const Pattern: UTF8String; const Flags: string = ''): Boolean; overload;
+function IsValidEcmaRegex(const Pattern: UTF8String; const Flags: string;
+  const Options: TEcmaRegexOptions): Boolean; overload;
+
+{ EcmaRegexUnicodeMajor is the major number of the version of Unicode a TEcmaRegexUnicodeVersion stands for: 13, 17
+  or 18. }
+function EcmaRegexUnicodeMajor(V: TEcmaRegexUnicodeVersion): Int32;
 
 { SetDefaultEcmaRegexMatchTimeout gives every pattern compiled after it, without a timeout of its own, the match
   timeout in seconds. 0 is no timeout. DefaultEcmaRegexMatchTimeout is the timeout such a pattern takes now. }
@@ -326,13 +391,16 @@ type
     function Replace8(const Text, Replacement: UTF8String; All: Boolean): UTF8String;
     function Replace16(const Text, Replacement: UnicodeString; All: Boolean): UnicodeString;
   public
-    constructor Create(const Pattern: UTF8String; Flags: TEcmaRegexFlags; Timeout: Int64);
+    constructor Create(const Pattern: UTF8String; Flags: TEcmaRegexFlags; Timeout: Int64;
+      Edition: TEcmaRegexEdition = ereCurrent; UnicodeVersion: TEcmaRegexUnicodeVersion = eruDefault);
     destructor Destroy; override;
     function GetPattern: UTF8String;
     function GetFlags: TEcmaRegexFlags;
     function GetFlagsText: string;
     function GetGroupCount: Int32;
     function GetMatchTimeout: Double;
+    function GetEdition: TEcmaRegexEdition;
+    function GetUnicodeVersion: Int32;
     function IsMatch(const Text: UTF8String; StartIndex: NativeInt = 1): Boolean; overload;
     function IsMatch(const Text: UnicodeString; StartIndex: NativeInt = 1): Boolean; overload;
     function IsMatch(const Text: TUtf8Text; StartIndex: NativeInt = 1): Boolean; overload;
@@ -475,8 +543,34 @@ begin
       Result := Result + FlagLetters[Ord(F) + 1];
 end;
 
-function SyntaxOf(Flags: TEcmaRegexFlags): TSyntax;
+class function TEcmaRegexOptions.Default: TEcmaRegexOptions;
 begin
+  Result.MatchTimeout := -1;
+  Result.Edition := ereCurrent;
+  Result.UnicodeVersion := eruDefault;
+end;
+
+function EcmaRegexUnicodeMajor(V: TEcmaRegexUnicodeVersion): Int32;
+begin
+  case V of
+    eru13: Result := 13;
+    eru18, eruLatest: Result := 18;
+  else
+    Result := 17;
+  end;
+end;
+
+function SyntaxOf(Flags: TEcmaRegexFlags; Edition: TEcmaRegexEdition = ereCurrent;
+  UnicodeVersion: TEcmaRegexUnicodeVersion = eruDefault): TSyntax;
+begin
+  // The grammar of ECMAScript 2020 has no d flag (2022) and no v flag (2024), and refuses them as flags that are not
+  // valid.
+  if (Edition = ereEs2020) and ((erfHasIndices in Flags) or (erfUnicodeSets in Flags)) then
+    raise EEcmaRegexFlags.Create('the flags ''' + EcmaRegexFlagsText(Flags) +
+      ''' have d or v, which ECMAScript 2020 does not have');
+  Result := Default(TSyntax);
+  Result.Es2020 := Edition = ereEs2020;
+  Result.UnicodeVersion := EcmaRegexUnicodeMajor(UnicodeVersion);
   Result.Unicode := (erfUnicode in Flags) or (erfUnicodeSets in Flags);
   Result.Sets := erfUnicodeSets in Flags;
   Result.ICase := erfIgnoreCase in Flags;
@@ -749,7 +843,8 @@ end;
 
 { TEcmaRegex }
 
-constructor TEcmaRegex.Create(const Pattern: UTF8String; Flags: TEcmaRegexFlags; Timeout: Int64);
+constructor TEcmaRegex.Create(const Pattern: UTF8String; Flags: TEcmaRegexFlags; Timeout: Int64;
+  Edition: TEcmaRegexEdition; UnicodeVersion: TEcmaRegexUnicodeVersion);
 var
   Arena: TNodeArena;
   Parsed: TParsed;
@@ -758,7 +853,7 @@ begin
   inherited Create;
   FPattern := Pattern;
   FFlags := Flags;
-  FSyntax := SyntaxOf(Flags);
+  FSyntax := SyntaxOf(Flags, Edition, UnicodeVersion);
   Arena := TNodeArena.Create;
   try
     try
@@ -894,6 +989,19 @@ end;
 function TEcmaRegex.GetMatchTimeout: Double;
 begin
   Result := FSearch.Limit / 1E9;
+end;
+
+function TEcmaRegex.GetEdition: TEcmaRegexEdition;
+begin
+  if FSyntax.Es2020 then
+    Result := ereEs2020
+  else
+    Result := ereCurrent;
+end;
+
+function TEcmaRegex.GetUnicodeVersion: Int32;
+begin
+  Result := FSyntax.UnicodeVersion;
 end;
 
 function TEcmaRegex.GroupName(G: Int32): UTF8String;
@@ -1250,13 +1358,56 @@ begin
   Result := TEcmaRegex.Create(Utf8Of(Pattern), ParseEcmaRegexFlags(Flags), TimeoutOf(MatchTimeout));
 end;
 
+function CompileEcmaRegex(const Pattern: UTF8String; const Flags: string;
+  const Options: TEcmaRegexOptions): IEcmaRegex;
+begin
+  Result := TEcmaRegex.Create(Pattern, ParseEcmaRegexFlags(Flags), TimeoutOf(Options.MatchTimeout), Options.Edition,
+    Options.UnicodeVersion);
+end;
+
+function TryCompileEcmaRegex(const Pattern: UTF8String; const Flags: string; const Options: TEcmaRegexOptions;
+  out Regex: IEcmaRegex; out Error: TEcmaRegexError): Boolean;
+begin
+  Regex := nil;
+  Error.Kind := eekNone;
+  Error.Message := '';
+  try
+    Regex := CompileEcmaRegex(Pattern, Flags, Options);
+  except
+    on E: EEcmaRegexSyntax do begin
+      Error.Kind := eekSyntax;
+      Error.Message := E.Message;
+    end;
+    on E: EEcmaRegexFlags do begin
+      Error.Kind := eekFlags;
+      Error.Message := E.Message;
+    end;
+    on E: EEcmaRegexTooLarge do begin
+      Error.Kind := eekTooLarge;
+      Error.Message := E.Message;
+    end;
+    on E: EEcmaRegexEncoding do begin
+      Error.Kind := eekEncoding;
+      Error.Message := E.Message;
+    end;
+  end;
+  Result := Error.Kind = eekNone;
+end;
+
 function IsValidEcmaRegex(const Pattern: UTF8String; const Flags: string): Boolean;
+begin
+  Result := IsValidEcmaRegex(Pattern, Flags, TEcmaRegexOptions.Default);
+end;
+
+function IsValidEcmaRegex(const Pattern: UTF8String; const Flags: string; const Options: TEcmaRegexOptions): Boolean;
 var
   F: TEcmaRegexFlags;
+  Sx: TSyntax;
   Arena: TNodeArena;
 begin
   try
     F := ParseEcmaRegexFlags(Flags);
+    Sx := SyntaxOf(F, Options.Edition, Options.UnicodeVersion);
   except
     on EEcmaRegexFlags do
       Exit(False);
@@ -1264,7 +1415,7 @@ begin
   Arena := TNodeArena.Create;
   try
     try
-      ParseWith(Pattern, SyntaxOf(F), Arena);
+      ParseWith(Pattern, Sx, Arena);
       Result := True;
     except
       on ESyntax do

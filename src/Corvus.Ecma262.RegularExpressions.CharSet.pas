@@ -105,20 +105,21 @@ function ComplementSet(const A: TCharSet): TCharSet;
   can be decided from the units on either side of a position. }
 function IsWordByte(B: UInt32): Boolean; inline;
 
-(* PropertySet resolves the expression between the braces of \p{...} to its set. It reports false for a name or value
-  that ECMA-262 does not define. *)
-function PropertySet(const Expr: UTF8String; out CharSet: TCharSet): Boolean;
+(* PropertySet resolves the expression between the braces of \p{...} to its set under a version of Unicode. It reports
+  false for a name or value that ECMA-262 does not define. *)
+function PropertySet(U: TUcd; const Expr: UTF8String; out CharSet: TCharSet): Boolean;
 
-{ PropertyPairs returns the ranges of a property expression. Every range comes from the tables of the Ucd unit,
-  which hold one fixed version of Unicode, so the answer does not depend on the compiler. }
-function PropertyPairs(const Expr: UTF8String; out Pairs: TRunes): Boolean;
+{ PropertyPairs returns the ranges of a property expression. Every range comes from the tables of the version of
+  Unicode in the Ucd unit, so the answer does not depend on the compiler. }
+function PropertyPairs(U: TUcd; const Expr: UTF8String; out Pairs: TRunes): Boolean;
 
-{ StringPropertyOf returns the property of strings of the name (RGI_Emoji and the six it is the union of), or nil. }
-function StringPropertyOf(const Name: UTF8String): PStringProperty;
+{ StringPropertyOf returns the property of strings of the name (RGI_Emoji and the six it is the union of) under a
+  version of Unicode, or nil. }
+function StringPropertyOf(U: TUcd; const Name: UTF8String): PStringProperty;
 
-{ MustBinaryTable returns the generated table of a binary property the engine relies on. Its absence means the
-  generated tables are broken, so it raises. }
-function MustBinaryTable(const Name: UTF8String): PUcdTable;
+{ MustBinaryTable returns the generated table of a binary property the engine relies on, in a version of Unicode. Its
+  absence means the generated tables are broken, so it raises. }
+function MustBinaryTable(U: TUcd; const Name: UTF8String): PUcdTable;
 
 { CategoryNameCount and BinaryNameCount are the sizes of the two lists of names a property expression can use, and
   CategoryNameAt and BinaryNameAt return a name of each. The tests walk them. }
@@ -127,16 +128,21 @@ function CategoryNameAt(Index: Int32): UTF8String;
 function BinaryNameCount: Int32;
 function BinaryNameAt(Index: Int32): UTF8String;
 
-{ Canonicalize is the Canonicalize function of ECMA-262 for case-insensitive matching. }
-function Canonicalize(R: Int32; UnicodeMode: Boolean): Int32;
+{ Canonicalize is the Canonicalize function of ECMA-262 for case-insensitive matching, with the case mappings of a
+  version of Unicode. }
+function Canonicalize(U: TUcd; R: Int32; UnicodeMode: Boolean): Int32;
 
-{ FoldClasses returns the table of the grammar in use. It is built on first use, which only a pattern with a
-  case-insensitive group reaches. }
-function FoldClasses(UnicodeMode: Boolean): PFoldTable;
+{ EqualIgnoringCase reports whether two characters are equal ignoring case, with the case mappings of the version of
+  Unicode whose major number a backreference carries: the test of a case-insensitive backreference. }
+function EqualIgnoringCase(Major, A, B: Int32; UnicodeMode: Boolean): Boolean;
 
-{ FoldClosure returns the set of every character equivalent to some member of the set, and in Variants the number of
-  characters with a case variant that the set holds, which is the work it did. }
-function FoldClosure(const CharSet: TCharSet; UnicodeMode: Boolean; out Variants: Int32): TCharSet;
+{ FoldClasses returns the table of the grammar in use for a version of Unicode. It is built on first use, which only a
+  pattern with a case-insensitive group reaches, and kept with the version's tables. }
+function FoldClasses(U: TUcd; UnicodeMode: Boolean): PFoldTable;
+
+{ FoldClosure returns the set of every character equivalent to some member of the set under a version of Unicode, and
+  in Variants the number of characters with a case variant that the set holds, which is the work it did. }
+function FoldClosure(U: TUcd; const CharSet: TCharSet; UnicodeMode: Boolean; out Variants: Int32): TCharSet;
 
 function IsFoldWordRune(R: Int32): Boolean; inline;
 
@@ -441,21 +447,21 @@ begin
   Result := True;
 end;
 
-function CategoryPairs(const Value: UTF8String; out Pairs: TRunes): Boolean;
+function CategoryPairs(U: TUcd; const Value: UTF8String; out Pairs: TRunes): Boolean;
 var
   Short: UTF8String;
 begin
   Pairs := nil;
   if not LookUp(CategoryNames, Value, Short) then
     Exit(False);
-  Result := TablePairs(UcdCategory(Short), Pairs);
+  Result := TablePairs(U.Category(Short), Pairs);
 end;
 
-function PropertySet(const Expr: UTF8String; out CharSet: TCharSet): Boolean;
+function PropertySet(U: TUcd; const Expr: UTF8String; out CharSet: TCharSet): Boolean;
 var
   Pairs: TRunes;
 begin
-  if not PropertyPairs(Expr, Pairs) then begin
+  if not PropertyPairs(U, Expr, Pairs) then begin
     CharSet.Ranges := nil;
     CharSet.Ascii[0] := 0;
     CharSet.Ascii[1] := 0;
@@ -465,7 +471,7 @@ begin
   Result := True;
 end;
 
-function PropertyPairs(const Expr: UTF8String; out Pairs: TRunes): Boolean;
+function PropertyPairs(U: TUcd; const Expr: UTF8String; out Pairs: TRunes): Boolean;
 var
   Name, Value, Canonical: UTF8String;
   HasValue: Boolean;
@@ -484,14 +490,14 @@ begin
     end;
   if HasValue then begin
     if (Name = 'General_Category') or (Name = 'gc') then
-      Exit(CategoryPairs(Value, Pairs));
+      Exit(CategoryPairs(U, Value, Pairs));
     if (Name = 'Script') or (Name = 'sc') then
-      Exit(TablePairs(UcdScript(Value), Pairs));
+      Exit(TablePairs(U.Script(Value), Pairs));
     if (Name = 'Script_Extensions') or (Name = 'scx') then
-      Exit(TablePairs(UcdScriptExtensions(Value), Pairs));
+      Exit(TablePairs(U.ScriptExtensions(Value), Pairs));
     Exit(False);
   end;
-  if CategoryPairs(Name, Pairs) then
+  if CategoryPairs(U, Name, Pairs) then
     Exit(True);
   if not LookUp(BinaryNames, Name, Canonical) then
     Exit(False);
@@ -507,7 +513,7 @@ begin
     Pairs[1] := MaxRune;
     Exit(True);
   end;
-  Result := TablePairs(UcdBinary(Canonical), Pairs);
+  Result := TablePairs(U.Binary(Canonical), Pairs);
 end;
 
 { Case-insensitive matching exists only inside a modifier group such as (?i:...). ECMA-262 defines it through a
@@ -518,8 +524,9 @@ end;
   The parser applies the equivalence to every literal and class as it reads them, so a case-insensitive group is
   matched with plain classes. Only a backreference needs the function when matching.
 
-  The folding and the uppercase mapping come from the tables of the Ucd unit, never from the run-time library of the
-  compiler, so a pattern matches the same texts whichever compiler built the program. }
+  The folding and the uppercase mapping come from the tables of the pattern's version of Unicode in the Ucd unit, never
+  from the run-time library of the compiler, so a pattern matches the same texts whichever compiler built the
+  program. }
 
 const
   MultiUpperPairs: array[0..53] of Int32 = (
@@ -528,22 +535,17 @@ const
     $1FC2, $1FC4, $1FC6, $1FC7, $1FCC, $1FCC, $1FD2, $1FD3, $1FD6, $1FD7, $1FE2, $1FE4, $1FE6, $1FE7,
     $1FF2, $1FF4, $1FF6, $1FF7, $1FFC, $1FFC, $FB00, $FB06, $FB13, $FB17);
 
-var
-  { The two tables, each nil until a thread has built it. They hold a PFoldTable. }
-  UnicodeFoldTable: Pointer = nil;
-  LegacyFoldTable: Pointer = nil;
-
-function Canonicalize(R: Int32; UnicodeMode: Boolean): Int32;
+function Canonicalize(U: TUcd; R: Int32; UnicodeMode: Boolean): Int32;
 var
   Upper: Int32;
 begin
   if UnicodeMode then
     // Every character of a simple case folding class folds to the same character.
-    Exit(UcdFold(R));
+    Exit(U.Fold(R));
   // A character beyond the Basic Multilingual Plane is two code units, and neither has an uppercase form.
   if (R > $FFFF) or MultiUpper.Contains(R) then
     Exit(R);
-  Upper := UcdToUpper(R);
+  Upper := U.ToUpper(R);
   if ((R >= 128) and (Upper < 128)) or (Upper > $FFFF) then
     Exit(R);
   Result := Upper;
@@ -613,7 +615,17 @@ begin
   Result := PFoldTable(Before);
 end;
 
-function FoldClasses(UnicodeMode: Boolean): PFoldTable;
+function EqualIgnoringCase(Major, A, B: Int32; UnicodeMode: Boolean): Boolean;
+var
+  U: TUcd;
+begin
+  U := UcdByMajor(Major);
+  Result := Canonicalize(U, A, UnicodeMode) = Canonicalize(U, B, UnicodeMode);
+end;
+
+{ The two tables of a version are kept in its UnicodeFoldSlot and LegacyFoldSlot, each nil until a thread has built
+  it. They hold a PFoldTable. }
+function FoldClasses(U: TUcd; UnicodeMode: Boolean): PFoldTable;
 var
   Pairs: TInt64Array;
   Folding: TUcdRunes;
@@ -621,40 +633,40 @@ var
   Key: Int64;
 begin
   if UnicodeMode then begin
-    Result := PFoldTable(UnicodeFoldTable);
+    Result := PFoldTable(U.UnicodeFoldSlot);
     if Result <> nil then
       Exit;
     // A class is a character that others fold to, with those others.
     Folding := nil;
-    UcdAppendFolding(Folding);
+    U.AppendFolding(Folding);
     SetLength(Pairs, 2 * Length(Folding));
     N := 0;
     for I := 0 to High(Folding) do begin
-      Key := UcdFold(Folding[I]);
+      Key := U.Fold(Folding[I]);
       Pairs[N] := (Key shl 32) or Key;
       Pairs[N + 1] := (Key shl 32) or Int64(Folding[I]);
       Inc(N, 2);
     end;
-    Exit(Publish(UnicodeFoldTable, NewFoldTable(Pairs, N)));
+    Exit(Publish(U.UnicodeFoldSlot, NewFoldTable(Pairs, N)));
   end;
-  Result := PFoldTable(LegacyFoldTable);
+  Result := PFoldTable(U.LegacyFoldSlot);
   if Result <> nil then
     Exit;
   SetLength(Pairs, $10000);
   for R := 0 to $FFFF do begin
-    Key := Canonicalize(R, False);
+    Key := Canonicalize(U, R, False);
     Pairs[R] := (Key shl 32) or Int64(R);
   end;
-  Result := Publish(LegacyFoldTable, NewFoldTable(Pairs, $10000));
+  Result := Publish(U.LegacyFoldSlot, NewFoldTable(Pairs, $10000));
 end;
 
-function FoldClosure(const CharSet: TCharSet; UnicodeMode: Boolean; out Variants: Int32): TCharSet;
+function FoldClosure(U: TUcd; const CharSet: TCharSet; UnicodeMode: Boolean; out Variants: Int32): TCharSet;
 var
   Table: PFoldTable;
   Extra: TRunes;
   I, K, M, N, Lo, Hi, First, Limit, Mid, Member: Int32;
 begin
-  Table := FoldClasses(UnicodeMode);
+  Table := FoldClasses(U, UnicodeMode);
   Extra := nil;
   N := 0;
   Variants := 0;
@@ -702,19 +714,17 @@ begin
   Result := ((R >= 0) and (R < 128) and IsWordByte(UInt32(R))) or (R = $17F) or (R = $212A);
 end;
 
-function MustBinaryTable(const Name: UTF8String): PUcdTable;
+function MustBinaryTable(U: TUcd; const Name: UTF8String): PUcdTable;
 begin
-  Result := UcdBinary(Name);
+  Result := U.Binary(Name);
   if Result = nil then
     raise EAssertionFailed.Create('the Unicode tables have no ' + string(Name));
 end;
 
-{$I Corvus.Ecma262.RegularExpressions.StringsTables.inc}
-
-var
-  { The properties of strings, the six and then RGI_Emoji, nil until a thread has built them. It holds a
-    PStringProperties. }
-  StringPropertiesSlot: Pointer = nil;
+const
+  { StringPropertyCount is the number of properties of strings but RGI_Emoji (the union of them all), in every version
+    of Unicode the engine carries. }
+  StringPropertyCount = 6;
 
 type
   TStringProperties = array[0..StringPropertyCount] of TStringProperty;
@@ -808,28 +818,33 @@ begin
   SetLength(Result, N);
 end;
 
-function AllStringProperties: PStringProperties;
+{ AllStringProperties returns the properties of strings of a version of Unicode, the six and then RGI_Emoji. They are
+  kept in its StringPropertiesSlot, nil until a thread has built them, which holds a PStringProperties. }
+function AllStringProperties(U: TUcd): PStringProperties;
 var
   Built: PStringProperties;
   Before: Pointer;
   Union, Pairs: TRunes;
   Every: TRuneLists;
-  K, I, U, E: Int32;
+  K, I, At, E: Int32;
 begin
-  Result := PStringProperties(StringPropertiesSlot);
+  Result := PStringProperties(U.StringPropertiesSlot);
   if Result <> nil then
     Exit;
+  if Length(U.StringNames) <> StringPropertyCount then
+    raise EAssertionFailed.Create('the Unicode tables have ' + IntToStr(Length(U.StringNames)) +
+      ' properties of strings');
   New(Built);
   Union := nil;
   Every := nil;
   for K := 0 to StringPropertyCount - 1 do begin
-    Pairs := ParsePoints(StringPropertyPoints[K]);
+    Pairs := ParsePoints(U.StringPoints[K]);
     Built^[K].CharSet := NewCharSet(Pairs);
-    Built^[K].Strings := ParseSequences(StringPropertySequences[K]);
-    U := Length(Union);
-    SetLength(Union, U + Length(Pairs));
+    Built^[K].Strings := ParseSequences(U.StringSequences[K]);
+    At := Length(Union);
+    SetLength(Union, At + Length(Pairs));
     for I := 0 to High(Pairs) do
-      Union[U + I] := Pairs[I];
+      Union[At + I] := Pairs[I];
     E := Length(Every);
     SetLength(Every, E + Length(Built^[K].Strings));
     for I := 0 to High(Built^[K].Strings) do
@@ -837,26 +852,34 @@ begin
   end;
   Built^[StringPropertyCount].CharSet := NewCharSet(Union);
   Built^[StringPropertyCount].Strings := Every;
-  Before := InterlockedCompareExchangePointer(StringPropertiesSlot, Built, nil);
+  Before := InterlockedCompareExchangePointer(U.StringPropertiesSlot, Built, nil);
   if Before = nil then
     Exit(Built);
   Dispose(Built);
   Result := PStringProperties(Before);
 end;
 
-function StringPropertyOf(const Name: UTF8String): PStringProperty;
+function StringPropertyOf(U: TUcd; const Name: UTF8String): PStringProperty;
 var
   All: PStringProperties;
   K: Int32;
 begin
-  All := AllStringProperties;
+  All := AllStringProperties(U);
   if Name = 'RGI_Emoji' then
     Exit(@All^[StringPropertyCount]);
   for K := 0 to StringPropertyCount - 1 do
-    if StringPropertyNames[K] = Name then
+    if U.StringNames[K] = Name then
       Exit(@All^[K]);
   Result := nil;
 end;
+
+const
+  { The versions of Unicode the engine carries, whose slots the unit frees when the program ends. }
+  MadeVersions: array[0..2] of Int32 = (13, 17, 18);
+
+var
+  At: Int32;
+  Ucd: TUcd;
 
 initialization
   DotSet := NewCharSet(LineTerminatorPairs, True);
@@ -872,10 +895,16 @@ initialization
   MultiUpper := NewCharSet(MultiUpperPairs, False);
 
 finalization
-  if UnicodeFoldTable <> nil then
-    Dispose(PFoldTable(UnicodeFoldTable));
-  if LegacyFoldTable <> nil then
-    Dispose(PFoldTable(LegacyFoldTable));
-  if StringPropertiesSlot <> nil then
-    Dispose(PStringProperties(StringPropertiesSlot));
+  // What was built from the tables of each version that was made.
+  for At := 0 to High(MadeVersions) do begin
+    Ucd := UcdMade(MadeVersions[At]);
+    if Ucd = nil then
+      Continue;
+    if Ucd.UnicodeFoldSlot <> nil then
+      Dispose(PFoldTable(Ucd.UnicodeFoldSlot));
+    if Ucd.LegacyFoldSlot <> nil then
+      Dispose(PFoldTable(Ucd.LegacyFoldSlot));
+    if Ucd.StringPropertiesSlot <> nil then
+      Dispose(PStringProperties(Ucd.StringPropertiesSlot));
+  end;
 end.

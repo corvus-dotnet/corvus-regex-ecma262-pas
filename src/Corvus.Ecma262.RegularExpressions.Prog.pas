@@ -66,7 +66,8 @@ type
     { Jump targets. }
     X: Int32;
     Y: Int32;
-    { A group, a loop or a range of groups, depending on the instruction. }
+    { A group, a loop or a range of groups, depending on the instruction. For a backreference B is the major number of
+      the version of Unicode whose case folding it matches with. }
     A: Int32;
     B: Int32;
     { Bound a repetition. A max of -1 is no bound. }
@@ -1151,6 +1152,7 @@ begin
         G := N.Groups[K];
         I := NewInst(Op);
         I.A := Tracked[G];
+        I.B := N.FoldVersion;
         I.Flag := Unicode;
         Add(I);
       end;
