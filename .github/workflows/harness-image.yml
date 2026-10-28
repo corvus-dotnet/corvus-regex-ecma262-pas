@@ -3,6 +3,9 @@
 # This repository publishes no benchmark results of its own: the central benchmark site
 # (https://corvus-oss.org/corvus-regex-ecma262-benchmarks/) runs this image each night on its runner, beside
 # the engines of every other source, and is the one page of figures.
+# Built for linux/amd64 and linux/arm64, each natively on a runner of its own architecture, then joined into one
+# multi-platform tag. A run by hand with release_tag builds that release's source and publishes it under that tag alone
+# (how a release made before the arm64 build gains one).
 name: harness-image
 on:
   push:
@@ -12,6 +15,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: A release's tag, to build that release's source and publish its image under that tag
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -21,25 +29,39 @@ concurrency:
   group: harness-image-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  IMAGE: ghcr.io/corvus-dotnet/corvus-regex-ecma262-pas
+  # The release whose image this run builds: the release that started it, or the tag a run by hand names.
+  RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag || '' }}
+
 jobs:
   image:
-    name: Harness image
-    runs-on: ubuntu-latest
+    name: Build and run (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - arch: amd64
+          runner: ubuntu-latest
+        - arch: arm64
+          runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       with:
         persist-credentials: false
+        ref: ${{ inputs.release_tag || '' }}
     - name: Write the library's version into its public unit
       # The harness reports the library's version, which is 0.0.0 on main. A library release (v<version>) tags a
       # commit with its version written in already; a harness release (harness-<version>.<n>, for the library at
       # <version>) tags a commit of main, so the version is written in here.
-      if: github.event_name == 'release' && startsWith(github.event.release.tag_name, 'harness-')
+      if: startsWith(env.RELEASE_TAG, 'harness-')
       env:
-        TAG: ${{ github.event.release.tag_name }}
+        TAG: ${{ env.RELEASE_TAG }}
       run: pwsh -NoProfile -File tools/release/stamp.ps1 -Tag "$TAG"
     - name: Build the harness image
-      run: docker build --build-arg COMMIT="${GITHUB_SHA::7}" -t harness .
+      run: docker build --build-arg COMMIT="$(git rev-parse --short=7 HEAD)" -t harness .
     - name: "Smoke-run it: two workloads, the short job, as the central site runs it"
       run: |
         python3 -c "import json; w=json.load(open('tools/benchmarks/workloads.json')); json.dump([x for x in w if x['id'] in ('sherlock: aei','sherlock: zqj')], open('workloads.json','w'), ensure_ascii=False)"
@@ -95,10 +117,51 @@ jobs:
           [ -f "texts/$f.txt.gz" ] || curl -sSfL -o "texts/$f.txt.gz" "https://raw.githubusercontent.com/dotnet/performance/main/src/benchmarks/micro/libraries/System.Text.RegularExpressions/TestData/$f.txt.gz"
         done
         docker run --rm -e COUNT_GATE=1 -v "$PWD/tools/benchmarks/workloads.json:/workloads.json:ro" -v "$PWD/texts:/texts:ro" -v "$PWD/out:/out" harness
-    - name: Publish the image
-      if: github.ref == 'refs/heads/main' || github.event_name == 'release'
+    - name: Push this architecture's image
+      # Under a tag of this run's alone; the publish job joins the two architectures into the tags the site pulls.
+      if: github.ref == 'refs/heads/main' || env.RELEASE_TAG != ''
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        ACTOR: ${{ github.actor }}
+        ARCH: ${{ matrix.arch }}
       run: |
-        echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
-        image=ghcr.io/corvus-dotnet/corvus-regex-ecma262-pas
-        docker tag harness "$image:latest" && docker push "$image:latest"
-        if [ '${{ github.event_name }}' = 'release' ]; then docker tag harness "$image:${{ github.event.release.tag_name }}" && docker push "$image:${{ github.event.release.tag_name }}"; fi
+        echo "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+        docker tag harness "$IMAGE:build-$GITHUB_RUN_ID-$ARCH"
+        docker push "$IMAGE:build-$GITHUB_RUN_ID-$ARCH"
+
+  gate:
+    # The check the ruleset of main requires: it passes when the image built and ran on both architectures.
+    name: Harness image
+    needs: image
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+    - name: Both architectures passed
+      env:
+        RESULT: ${{ needs.image.result }}
+      run: |
+        if [ "$RESULT" != success ]; then echo "::error::The image job ended $RESULT."; exit 1; fi
+
+  publish:
+    name: Publish the image
+    needs: image
+    if: github.ref == 'refs/heads/main' || github.event_name == 'release' || inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - name: Join the architectures into one tag
+      # `:latest` from main; the release's tag from a release (which moves `:latest` too, as before) or from a run by
+      # hand that names one (which leaves `:latest` alone).
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        ACTOR: ${{ github.actor }}
+        EVENT: ${{ github.event_name }}
+      run: |
+        echo "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+        tags=()
+        if [ -n "$RELEASE_TAG" ]; then tags+=("$IMAGE:$RELEASE_TAG"); fi
+        if [ -z "$RELEASE_TAG" ] || [ "$EVENT" = release ]; then tags+=("$IMAGE:latest"); fi
+        args=()
+        for t in "${tags[@]}"; do args+=(-t "$t"); done
+        docker buildx imagetools create "${args[@]}" "$IMAGE:build-$GITHUB_RUN_ID-amd64" "$IMAGE:build-$GITHUB_RUN_ID-arm64"
+        for t in "${tags[@]}"; do docker buildx imagetools inspect "$t"; done
