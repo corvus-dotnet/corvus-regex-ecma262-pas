@@ -1,5 +1,11 @@
 unit Corvus.Ecma262.RegularExpressions.Swar;
 {$I ecma262.inc}
+{$IFDEF FPC}
+  { The loops of these searches are most of the time of a search, and where a loop falls against a boundary of 32
+    bytes changes its speed by a tenth: every function of the unit starts on a boundary of 64 bytes, so that each loop
+    falls where the unit's own code puts it, whatever the units linked before it hold. }
+  {$CODEALIGN PROC=64}
+{$ENDIF}
 
 { The searches the Rust crate takes from memchr, and the Teddy search it takes from aho-corasick. Over x86_64 each
   reads sixteen bytes at a time with SSE2 (Teddy with SSSE3) and finishes with SWAR; over any other processor one byte
