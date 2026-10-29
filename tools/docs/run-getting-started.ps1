@@ -4,9 +4,9 @@
     (docs/getting-started.md), so that the page shows only code that works.
 
 .DESCRIPTION
-    Each block of Pascal on the page is a whole program. It is compiled against src with the same compiler and options
-    as tools/build.ps1 gives the tests, and run; a program that does not compile, or ends with an exception, fails the
-    script.
+    Each block of Pascal on the page that is a whole program (it has a program clause) is compiled against src
+    with the same compiler and options as tools/build.ps1 gives the tests, and run; a program that does not compile,
+    or ends with an exception, fails the script.
 
 .PARAMETER Fpc
     The Free Pascal compiler. The default is the fpc on the PATH.
@@ -25,7 +25,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $page = [System.IO.File]::ReadAllText((Join-Path $root 'docs' 'getting-started.md'))
-$blocks = @([regex]::Matches($page, '(?ms)^```pascal\n(.*?)^```$') | ForEach-Object { $_.Groups[1].Value })
+$blocks = @([regex]::Matches($page, '(?ms)^```pascal\n(.*?)^```$') | ForEach-Object { $_.Groups[1].Value } |
+    # A block that is not a whole program, such as the uses clause of Setup, is not compiled.
+    Where-Object { $_ -match '(?m)^program \w+;' })
 if ($blocks.Count -lt 5) { throw "The page has $($blocks.Count) programs." }
 
 $work = Join-Path ([System.IO.Path]::GetTempPath()) "getting-started-$PID"
