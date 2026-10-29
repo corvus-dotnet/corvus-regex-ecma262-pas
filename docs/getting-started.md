@@ -132,10 +132,14 @@ end.
 
 ## The edition and the version of Unicode
 
-JSON Schema 2020-12 names the grammar of ECMAScript 2020. `ereEs2020` refuses what later editions added, and nothing
-else: the `d` and `v` flags, modifier groups such as `(?i:...)`, a group name used by two groups, and a property name
-or value that is not in the 2020 tables (such as `\p{Script=Yezidi}`). A pattern it accepts has the same answers as in
-today's grammar.
+By default a pattern is read with today's grammar, ECMAScript 2025 (`ereCurrent`), and with the tables of the version of
+Unicode that V8 carries, 17 today (`eruDefault`). Either can be overridden when the pattern is compiled, each
+independently of the other.
+
+JSON Schema 2020-12 names the grammar of ECMAScript 2020, which `ereEs2020` selects in place of the default. It refuses
+what later editions added, and nothing else: the `d` and `v` flags, modifier groups such as `(?i:...)`, a group name
+used by two groups, and a property name or value that is not in the 2020 tables (such as `\p{Script=Yezidi}`). A pattern
+it accepts has the same answers as in today's grammar.
 
 The version of Unicode is chosen apart from the edition: `eru13`, `eru17`, `eru18`, `eruLatest` (18 today) or
 `eruDefault`, the version of the V8 the answers are held to (17 today). It decides the members of each `\p{...}`, the
