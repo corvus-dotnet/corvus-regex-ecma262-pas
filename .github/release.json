@@ -6,7 +6,11 @@
       "stampedTag": true,
       "nextVersion": "0.1.0",
       "paths": [
-        "src/"
+        "src/",
+        "docs/getting-started.md",
+        "docs/api.md",
+        "docs/design.md",
+        "docs/contributing.md"
       ],
       "stamp": [
         {
