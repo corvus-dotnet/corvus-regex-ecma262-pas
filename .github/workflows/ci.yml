@@ -96,6 +96,13 @@ jobs:
         bin/TestEngine
         bin/TestSearch
         bin/TestAllocations
+    - name: The getting-started programs
+      # Each program of the page the documentation site publishes, compiled and run as the tests are.
+      run: pwsh -NoProfile -File tools/docs/run-getting-started.ps1 -Options "-O3 $FPC_TARGET"
+    - name: The API reference is current
+      # docs/api.md, which the documentation site publishes, is what the unit's interface makes.
+      if: runner.os == 'Linux'
+      run: pwsh -NoProfile -File tools/docs/gen-api.ps1 -Check
     - name: Test with the memory of failed places from the first step
       if: runner.os == 'Linux'
       run: |
